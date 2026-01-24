@@ -1,0 +1,798 @@
+// DOCX OOXML Builder - Converts Univer IDocumentData to DOCX format
+// High-fidelity export with proper tables, images, text formatting, and lists
+
+import JSZip from "jszip";
+import { create } from "xmlbuilder2";
+import type { IDocumentData } from "@univerjs/core";
+
+// Image counter for relationship IDs
+let globalImageCounter = 1;
+let globalRIdCounter = 3; // Start at 3 to leave room for styles and numbering
+
+interface ImageInfo {
+  drawingId: string;
+  rId: string;
+  filename: string;
+  width: number;
+  height: number;
+  base64Data: string;
+  extension: string;
+}
+
+// ✅ OOXML VALIDATION: Validate document structure before export
+function validateOOXMLStructure(documentData: IDocumentData): string[] {
+  const errors: string[] = [];
+  const dataStream = documentData.body?.dataStream || "";
+  const paragraphs = documentData.body?.paragraphs || [];
+  const customRanges = documentData.body?.customRanges || [];
+
+  // Check dataStream ends with \r\n (required by Univer)
+  if (!dataStream.endsWith("\r\n")) {
+    errors.push("dataStream must end with \\r\\n for valid Univer document");
+  }
+
+  // Check all paragraphs have valid startIndex
+  paragraphs.forEach((p: any, i: number) => {
+    if (p.startIndex >= dataStream.length) {
+      errors.push(
+        `Paragraph ${i} startIndex ${p.startIndex} exceeds dataStream length ${dataStream.length}`
+      );
+    }
+  });
+
+  // Check customRanges point to valid positions
+  customRanges.forEach((range: any, i: number) => {
+    if (range.startIndex >= dataStream.length) {
+      errors.push(
+        `CustomRange ${i} (${range.rangeId}) startIndex ${range.startIndex} exceeds dataStream length`
+      );
+    }
+
+    // Verify range points to correct marker (only for tables and images, NOT hyperlinks)
+    if (range.rangeType > 0 && range.startIndex < dataStream.length) {
+      const char = dataStream.charAt(range.startIndex);
+      const charCode = char.charCodeAt(0);
+      if (charCode !== 0x1a) {
+        errors.push(
+          `CustomRange ${i} (${range.rangeId}) type ${
+            range.rangeType
+          } should point to marker 0x1A but found 0x${charCode.toString(
+            16
+          )} at position ${range.startIndex}`
+        );
+      }
+    }
+  });
+
+  // Check textRuns don't exceed dataStream
+  const textRuns = documentData.body?.textRuns || [];
+  textRuns.forEach((tr: any, i: number) => {
+    if (tr.ed > dataStream.length) {
+      errors.push(
+        `TextRun ${i} end position ${tr.ed} exceeds dataStream length ${dataStream.length}`
+      );
+    }
+  });
+
+  return errors;
+}
+
+export async function buildDocxFromUniverData(
+  documentData: IDocumentData
+): Promise<Blob> {
+  // ✅ Validate structure before export
+  const validationErrors = validateOOXMLStructure(documentData);
+  if (validationErrors.length > 0) {
+    console.error("[DOCX Export] ❌ Validation failed:", validationErrors);
+    throw new Error(
+      `Invalid document structure (${
+        validationErrors.length
+      } errors):\n${validationErrors.slice(0, 5).join("\n")}${
+        validationErrors.length > 5
+          ? `\n... and ${validationErrors.length - 5} more errors`
+          : ""
+      }`
+    );
+  }
+
+  console.log("[DOCX Export] ✅ Document structure validated successfully");
+  // Reset counters
+  globalImageCounter = 1;
+  globalRIdCounter = 3;
+
+  const zip = new JSZip();
+
+  // Prepare image info for document building
+  const imageInfos: ImageInfo[] = [];
+  const drawings = (documentData as any).drawings || {};
+  const drawingsOrder =
+    (documentData as any).drawingsOrder || Object.keys(drawings);
+
+  // Process drawings in order
+  for (const drawingId of drawingsOrder) {
+    const drawing = drawings[drawingId];
+    if (
+      drawing &&
+      (drawing.drawingType === "image" || drawing.drawingType === 1) &&
+      drawing.imageProperties?.base64Cache
+    ) {
+      const base64Full = drawing.imageProperties.base64Cache;
+      const base64Data = base64Full.includes(",")
+        ? base64Full.split(",")[1]
+        : base64Full;
+
+      if (base64Data) {
+        const extension = getImageExtension(
+          drawing.imageProperties.source || base64Full
+        );
+        const filename = `image${globalImageCounter}.${extension}`;
+
+        imageInfos.push({
+          drawingId,
+          rId: `rId${globalRIdCounter}`,
+          filename,
+          width:
+            drawing.transform?.size?.width ||
+            drawing.docTransform?.size?.width ||
+            200,
+          height:
+            drawing.transform?.size?.height ||
+            drawing.docTransform?.size?.height ||
+            200,
+          base64Data,
+          extension,
+        });
+
+        globalImageCounter++;
+        globalRIdCounter++;
+      }
+    }
+  }
+
+  // Check if document has lists
+  const hasLists =
+    documentData.body?.paragraphs?.some((p: any) => p.bullet) || false;
+
+  // Build XML content
+  const documentXml = buildDocumentXml(documentData, imageInfos);
+  const stylesXml = buildStylesXml(documentData);
+  const numberingXml = hasLists ? buildNumberingXml(documentData) : null;
+  const relsXml = buildRelsXml(documentData, imageInfos, hasLists);
+  const contentTypesXml = buildContentTypesXml(documentData, imageInfos);
+
+  // Add files to ZIP
+  zip.file("[Content_Types].xml", contentTypesXml);
+  zip.folder("_rels")?.file(".rels", buildRootRels());
+  zip.folder("word")?.file("document.xml", documentXml);
+  zip.folder("word")?.file("styles.xml", stylesXml);
+  if (numberingXml) {
+    zip.folder("word")?.file("numbering.xml", numberingXml);
+  }
+  zip.folder("word/_rels")?.file("document.xml.rels", relsXml);
+
+  // Add images to media folder
+  for (const imgInfo of imageInfos) {
+    try {
+      const imageBuffer = Uint8Array.from(atob(imgInfo.base64Data), (c) =>
+        c.charCodeAt(0)
+      );
+      zip.folder("word/media")?.file(imgInfo.filename, imageBuffer);
+      console.log(`[DOCX Export] Added image: ${imgInfo.filename}`);
+    } catch (err) {
+      console.error(
+        `[DOCX Export] Failed to add image ${imgInfo.filename}:`,
+        err
+      );
+    }
+  }
+
+  console.log("[DOCX Export] ZIP structure created, generating blob...");
+  return await zip.generateAsync({ type: "blob" });
+}
+
+function buildDocumentXml(
+  documentData: IDocumentData,
+  imageInfos: ImageInfo[]
+): string {
+  const dataStream = documentData.body?.dataStream || "";
+  const textRuns = documentData.body?.textRuns || [];
+  const paragraphs = documentData.body?.paragraphs || [];
+
+  const doc = create({ version: "1.0", encoding: "UTF-8", standalone: "yes" })
+    .ele("w:document", {
+      "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+      "xmlns:r":
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    })
+    .ele("w:body");
+
+  // Find image marker positions (0x1A character)
+  const imageMarkerPositions: number[] = [];
+  for (let i = 0; i < dataStream.length; i++) {
+    if (dataStream.charCodeAt(i) === 0x1a) {
+      imageMarkerPositions.push(i);
+    }
+  }
+
+  // Map image markers to image info
+  const imageAtPosition: Map<number, ImageInfo> = new Map();
+  imageMarkerPositions.forEach((pos, idx) => {
+    if (idx < imageInfos.length) {
+      imageAtPosition.set(pos, imageInfos[idx]);
+    }
+  });
+
+  console.log(
+    `[DOCX Export] Building document: ${paragraphs.length} paragraphs, ${imageInfos.length} images`
+  );
+
+  // Handle empty document
+  if (paragraphs.length === 0) {
+    const p = doc.ele("w:p");
+    if (dataStream.length > 0) {
+      const cleanText = dataStream.replace(/[\x00-\x1F]/g, "").trim();
+      if (cleanText.length > 0) {
+        const r = p.ele("w:r");
+        r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
+      }
+    } else {
+      p.ele("w:r");
+    }
+  }
+
+  // Process paragraphs
+  paragraphs.forEach((para: any, paraIndex: number) => {
+    const nextPara = paragraphs[paraIndex + 1];
+    const paraStart = para.startIndex;
+    const paraEnd = nextPara ? nextPara.startIndex : dataStream.length;
+
+    const p = doc.ele("w:p");
+    const pPr = p.ele("w:pPr");
+
+    if (para.paragraphStyle) {
+      addParagraphProperties(pPr, para.paragraphStyle);
+    }
+
+    if (para.bullet) {
+      addBulletProperties(pPr, para.bullet);
+    }
+
+    // Process runs in this paragraph
+    const paraRuns = textRuns.filter(
+      (run: any) => run.st < paraEnd && run.ed > paraStart
+    );
+
+    if (paraRuns.length === 0) {
+      // Check for image
+      const imgPos = imageMarkerPositions.find(
+        (pos) => pos >= paraStart && pos < paraEnd
+      );
+      if (imgPos !== undefined) {
+        const imgInfo = imageAtPosition.get(imgPos);
+        if (imgInfo) {
+          addImageToRun(p, imgInfo);
+        }
+      } else {
+        p.ele("w:r");
+      }
+    } else {
+      let lastRunEnd = paraStart;
+
+      paraRuns.forEach((run: any) => {
+        const runStart = Math.max(run.st, paraStart);
+        const runEnd = Math.min(run.ed, paraEnd);
+
+        // Check for image between runs
+        const imgBetween = imageMarkerPositions.find(
+          (pos) => pos >= lastRunEnd && pos < runStart
+        );
+        if (imgBetween !== undefined) {
+          const imgInfo = imageAtPosition.get(imgBetween);
+          if (imgInfo) {
+            addImageToRun(p, imgInfo);
+          }
+        }
+
+        const runText = dataStream.substring(runStart, runEnd);
+        const imgInRun = imageMarkerPositions.find(
+          (pos) => pos >= runStart && pos < runEnd
+        );
+
+        if (imgInRun !== undefined) {
+          const imgInfo = imageAtPosition.get(imgInRun);
+
+          // Text before image
+          const beforeImg = runText.substring(0, imgInRun - runStart);
+          if (beforeImg && beforeImg.replace(/[\x00-\x1F]/g, "").length > 0) {
+            const r1 = p.ele("w:r");
+            if (run.ts && Object.keys(run.ts).length > 0) {
+              const rPr = r1.ele("w:rPr");
+              addRunProperties(rPr, run.ts);
+            }
+            r1.ele("w:t", { "xml:space": "preserve" }).txt(
+              beforeImg.replace(/[\x00-\x1F]/g, "")
+            );
+          }
+
+          if (imgInfo) {
+            addImageToRun(p, imgInfo);
+          }
+
+          // Text after image
+          const afterImg = runText.substring(imgInRun - runStart + 1);
+          if (afterImg && afterImg.replace(/[\x00-\x1F]/g, "").length > 0) {
+            const r2 = p.ele("w:r");
+            if (run.ts && Object.keys(run.ts).length > 0) {
+              const rPr = r2.ele("w:rPr");
+              addRunProperties(rPr, run.ts);
+            }
+            r2.ele("w:t", { "xml:space": "preserve" }).txt(
+              afterImg.replace(/[\x00-\x1F]/g, "")
+            );
+          }
+        } else {
+          // Regular text run
+          const cleanText = runText.replace(/[\x00-\x1F]/g, "");
+          if (cleanText.length > 0) {
+            const r = p.ele("w:r");
+
+            if (run.ts && Object.keys(run.ts).length > 0) {
+              const rPr = r.ele("w:rPr");
+              addRunProperties(rPr, run.ts);
+            }
+
+            r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
+          }
+        }
+
+        lastRunEnd = runEnd;
+      });
+    }
+  });
+
+  // Add section properties
+  const sectPr = doc.ele("w:sectPr");
+  const pageWidth = (documentData.documentStyle as any)?.pageSize?.width || 612;
+  const pageHeight = (documentData.documentStyle as any)?.pageSize?.height || 792;
+
+  sectPr.ele("w:pgSz", {
+    "w:w": Math.round(pageWidth * 20).toString(),
+    "w:h": Math.round(pageHeight * 20).toString(),
+  });
+
+  const marginTop = (documentData.documentStyle as any)?.marginTop || 72;
+  const marginBottom = (documentData.documentStyle as any)?.marginBottom || 72;
+  const marginLeft = (documentData.documentStyle as any)?.marginLeft || 90;
+  const marginRight = (documentData.documentStyle as any)?.marginRight || 90;
+
+  sectPr.ele("w:pgMar", {
+    "w:top": Math.round(marginTop * 20).toString(),
+    "w:bottom": Math.round(marginBottom * 20).toString(),
+    "w:left": Math.round(marginLeft * 20).toString(),
+    "w:right": Math.round(marginRight * 20).toString(),
+    "w:header": "720",
+    "w:footer": "720",
+    "w:gutter": "0",
+  });
+
+  return doc.end({ prettyPrint: true });
+}
+
+function addImageToRun(parentElement: any, imgInfo: ImageInfo): void {
+  const widthEmu = Math.round(imgInfo.width * 12700);
+  const heightEmu = Math.round(imgInfo.height * 12700);
+
+  const r = parentElement.ele("w:r");
+  const drawing = r.ele("w:drawing");
+  const inline = drawing.ele("wp:inline", {
+    "xmlns:wp":
+      "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    distT: "0",
+    distB: "0",
+    distL: "0",
+    distR: "0",
+  });
+
+  inline.ele("wp:extent", {
+    cx: widthEmu.toString(),
+    cy: heightEmu.toString(),
+  });
+
+  inline.ele("wp:effectExtent", { l: "0", t: "0", r: "0", b: "0" });
+
+  const docId = imgInfo.rId.replace("rId", "");
+  inline.ele("wp:docPr", {
+    id: docId,
+    name: `Picture ${docId}`,
+  });
+
+  const cNvGraphicFramePr = inline.ele("wp:cNvGraphicFramePr");
+  cNvGraphicFramePr.ele("a:graphicFrameLocks", {
+    "xmlns:a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    noChangeAspect: "1",
+  });
+
+  const graphic = inline.ele("a:graphic", {
+    "xmlns:a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+  });
+
+  const graphicData = graphic.ele("a:graphicData", {
+    uri: "http://schemas.openxmlformats.org/drawingml/2006/picture",
+  });
+
+  const pic = graphicData.ele("pic:pic", {
+    "xmlns:pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+  });
+
+  const nvPicPr = pic.ele("pic:nvPicPr");
+  nvPicPr.ele("pic:cNvPr", { id: docId, name: imgInfo.filename });
+  nvPicPr.ele("pic:cNvPicPr");
+
+  const blipFill = pic.ele("pic:blipFill");
+  blipFill.ele("a:blip", { "r:embed": imgInfo.rId });
+  const stretch = blipFill.ele("a:stretch");
+  stretch.ele("a:fillRect");
+
+  const spPr = pic.ele("pic:spPr");
+  const xfrm = spPr.ele("a:xfrm");
+  xfrm.ele("a:off", { x: "0", y: "0" });
+  xfrm.ele("a:ext", { cx: widthEmu.toString(), cy: heightEmu.toString() });
+
+  const prstGeom = spPr.ele("a:prstGeom", { prst: "rect" });
+  prstGeom.ele("a:avLst");
+
+  console.log(
+    `[DOCX Export] Added inline image: ${imgInfo.filename} (${imgInfo.width}x${imgInfo.height}pt)`
+  );
+}
+
+function addParagraphProperties(pPr: any, style: any): void {
+  if (style.horizontalAlign !== undefined) {
+    const alignMap = ["left", "center", "right", "both"];
+    pPr.ele("w:jc", { "w:val": alignMap[style.horizontalAlign] || "left" });
+  }
+
+  const spacingAttrs: any = {};
+  if (style.lineSpacing) {
+    spacingAttrs["w:line"] = Math.round(style.lineSpacing * 240).toString();
+    spacingAttrs["w:lineRule"] = "auto";
+  }
+  if (style.spaceAbove?.v) {
+    spacingAttrs["w:before"] = Math.round(style.spaceAbove.v * 20).toString();
+  }
+  if (style.spaceBelow?.v) {
+    spacingAttrs["w:after"] = Math.round(style.spaceBelow.v * 20).toString();
+  }
+  if (Object.keys(spacingAttrs).length > 0) {
+    pPr.ele("w:spacing", spacingAttrs);
+  }
+
+  const indAttrs: any = {};
+  if (style.indentStart?.v) {
+    indAttrs["w:left"] = Math.round(style.indentStart.v * 20).toString();
+  }
+  if (style.indentEnd?.v) {
+    indAttrs["w:right"] = Math.round(style.indentEnd.v * 20).toString();
+  }
+  if (style.hanging?.v) {
+    indAttrs["w:hanging"] = Math.round(style.hanging.v * 20).toString();
+  }
+  if (style.indentFirstLine?.v) {
+    indAttrs["w:firstLine"] = Math.round(
+      style.indentFirstLine.v * 20
+    ).toString();
+  }
+  if (Object.keys(indAttrs).length > 0) {
+    pPr.ele("w:ind", indAttrs);
+  }
+}
+
+function addRunProperties(rPr: any, ts: any): void {
+  if (ts.bl === 1) {
+    rPr.ele("w:b");
+    rPr.ele("w:bCs");
+  }
+
+  if (ts.it === 1) {
+    rPr.ele("w:i");
+    rPr.ele("w:iCs");
+  }
+
+  if (ts.ul) {
+    rPr.ele("w:u", { "w:val": "single" });
+  }
+
+  if (ts.st === 1 || ts.st?.s === 1) {
+    rPr.ele("w:strike");
+  }
+
+  if (ts.fs) {
+    rPr.ele("w:sz", { "w:val": Math.round(ts.fs * 2).toString() });
+    rPr.ele("w:szCs", { "w:val": Math.round(ts.fs * 2).toString() });
+  }
+
+  if (ts.ff) {
+    rPr.ele("w:rFonts", {
+      "w:ascii": ts.ff,
+      "w:hAnsi": ts.ff,
+      "w:cs": ts.ff,
+      "w:eastAsia": ts.ff,
+    });
+  }
+
+  if (ts.cl) {
+    let color = null;
+    if (ts.cl.rgb) {
+      color = ts.cl.rgb.replace("#", "");
+    } else if (typeof ts.cl === "string") {
+      color = ts.cl.replace("#", "");
+    }
+    if (color && color !== "000000") {
+      rPr.ele("w:color", { "w:val": color });
+    }
+  }
+
+  if (ts.bg) {
+    let bgColor = null;
+    if (ts.bg.rgb) {
+      bgColor = ts.bg.rgb;
+    } else if (typeof ts.bg === "string") {
+      bgColor = ts.bg;
+    }
+
+    if (bgColor) {
+      const highlightColor = mapRgbToHighlight(bgColor);
+      if (highlightColor) {
+        rPr.ele("w:highlight", { "w:val": highlightColor });
+      } else {
+        rPr.ele("w:shd", {
+          "w:val": "clear",
+          "w:color": "auto",
+          "w:fill": bgColor.replace("#", ""),
+        });
+      }
+    }
+  }
+
+  if (ts.va === 1) {
+    rPr.ele("w:vertAlign", { "w:val": "superscript" });
+  } else if (ts.va === 2) {
+    rPr.ele("w:vertAlign", { "w:val": "subscript" });
+  }
+}
+
+function addBulletProperties(pPr: any, bullet: any): void {
+  const numPr = pPr.ele("w:numPr");
+  numPr.ele("w:ilvl", { "w:val": (bullet.nestingLevel || 0).toString() });
+  numPr.ele("w:numId", { "w:val": bullet.listId || "1" });
+}
+
+function buildStylesXml(_documentData: IDocumentData): string {
+  const styles = create({
+    version: "1.0",
+    encoding: "UTF-8",
+    standalone: "yes",
+  }).ele("w:styles", {
+    "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+  });
+
+  const docDefaults = styles.ele("w:docDefaults");
+  const rPrDefault = docDefaults.ele("w:rPrDefault").ele("w:rPr");
+  rPrDefault.ele("w:rFonts", {
+    "w:ascii": "Calibri",
+    "w:hAnsi": "Calibri",
+  });
+  rPrDefault.ele("w:sz", { "w:val": "22" });
+  rPrDefault.ele("w:szCs", { "w:val": "22" });
+
+  const normalStyle = styles.ele("w:style", {
+    "w:type": "paragraph",
+    "w:styleId": "Normal",
+    "w:default": "1",
+  });
+  normalStyle.ele("w:name", { "w:val": "Normal" });
+
+  return styles.end({ prettyPrint: true });
+}
+
+function buildNumberingXml(documentData: IDocumentData): string | null {
+  const paragraphs = documentData.body?.paragraphs || [];
+  const lists = (documentData as any).lists || {};
+  const hasLists = paragraphs.some((p: any) => p.bullet);
+
+  if (!hasLists) return null;
+
+  const numbering = create({
+    version: "1.0",
+    encoding: "UTF-8",
+    standalone: "yes",
+  }).ele("w:numbering", {
+    "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+  });
+
+  const uniqueListIds = new Set<string>();
+  paragraphs.forEach((p: any) => {
+    if (p.bullet?.listId) {
+      uniqueListIds.add(p.bullet.listId);
+    }
+  });
+
+  const listIdArray = Array.from(uniqueListIds);
+
+  listIdArray.forEach((listId, index) => {
+    const abstractNumId = index.toString();
+    const listDef = lists[listId];
+    const isBullet =
+      listDef?.listType === "BULLET_LIST" || listDef?.listType === 2;
+
+    const abstractNum = numbering.ele("w:abstractNum", {
+      "w:abstractNumId": abstractNumId,
+    });
+
+    abstractNum.ele("w:multiLevelType", { "w:val": "hybridMultilevel" });
+
+    for (let lvl = 0; lvl < 9; lvl++) {
+      const level = abstractNum.ele("w:lvl", { "w:ilvl": lvl.toString() });
+      level.ele("w:start", { "w:val": "1" });
+
+      if (isBullet) {
+        level.ele("w:numFmt", { "w:val": "bullet" });
+        const bulletChars = ["•", "○", "■"];
+        level.ele("w:lvlText", {
+          "w:val": bulletChars[lvl % bulletChars.length],
+        });
+        level.ele("w:lvlJc", { "w:val": "left" });
+
+        const pPr = level.ele("w:pPr");
+        const indent = 720 + lvl * 360;
+        pPr.ele("w:ind", {
+          "w:left": indent.toString(),
+          "w:hanging": "360",
+        });
+
+        const rPr = level.ele("w:rPr");
+        rPr.ele("w:rFonts", { "w:ascii": "Symbol", "w:hAnsi": "Symbol" });
+      } else {
+        level.ele("w:numFmt", { "w:val": "decimal" });
+        level.ele("w:lvlText", { "w:val": `%${lvl + 1}.` });
+        level.ele("w:lvlJc", { "w:val": "left" });
+      }
+    }
+
+    const num = numbering.ele("w:num", { "w:numId": listId });
+    num.ele("w:abstractNumId", { "w:val": abstractNumId });
+  });
+
+  return numbering.end({ prettyPrint: true });
+}
+
+function buildRelsXml(
+  _documentData: IDocumentData,
+  imageInfos: ImageInfo[],
+  hasLists: boolean
+): string {
+  const rels = create({
+    version: "1.0",
+    encoding: "UTF-8",
+    standalone: "yes",
+  }).ele("Relationships", {
+    xmlns: "http://schemas.openxmlformats.org/package/2006/relationships",
+  });
+
+  let rIdCounter = 1;
+
+  rels.ele("Relationship", {
+    Id: `rId${rIdCounter++}`,
+    Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
+    Target: "styles.xml",
+  });
+
+  if (hasLists) {
+    rels.ele("Relationship", {
+      Id: `rId${rIdCounter++}`,
+      Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
+      Target: "numbering.xml",
+    });
+  }
+
+  imageInfos.forEach((imgInfo) => {
+    imgInfo.rId = `rId${rIdCounter}`;
+    rels.ele("Relationship", {
+      Id: imgInfo.rId,
+      Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+      Target: `media/${imgInfo.filename}`,
+    });
+    rIdCounter++;
+  });
+
+  return rels.end({ prettyPrint: true });
+}
+
+function buildContentTypesXml(
+  _documentData: IDocumentData,
+  imageInfos: ImageInfo[]
+): string {
+  const contentTypes = create({
+    version: "1.0",
+    encoding: "UTF-8",
+    standalone: "yes",
+  }).ele("Types", {
+    xmlns: "http://schemas.openxmlformats.org/package/2006/content-types",
+  });
+
+  contentTypes.ele("Default", {
+    Extension: "rels",
+    ContentType: "application/vnd.openxmlformats-package.relationships+xml",
+  });
+  contentTypes.ele("Default", {
+    Extension: "xml",
+    ContentType: "application/xml",
+  });
+
+  const imageExtensions = new Set(imageInfos.map((img) => img.extension));
+  imageExtensions.forEach((ext) => {
+    let contentType = "image/png";
+    if (ext === "jpg" || ext === "jpeg") contentType = "image/jpeg";
+    else if (ext === "gif") contentType = "image/gif";
+    else if (ext === "bmp") contentType = "image/bmp";
+
+    contentTypes.ele("Default", {
+      Extension: ext,
+      ContentType: contentType,
+    });
+  });
+
+  contentTypes.ele("Override", {
+    PartName: "/word/document.xml",
+    ContentType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+  });
+  contentTypes.ele("Override", {
+    PartName: "/word/styles.xml",
+    ContentType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+  });
+
+  return contentTypes.end({ prettyPrint: true });
+}
+
+function buildRootRels(): string {
+  const rels = create({
+    version: "1.0",
+    encoding: "UTF-8",
+    standalone: "yes",
+  }).ele("Relationships", {
+    xmlns: "http://schemas.openxmlformats.org/package/2006/relationships",
+  });
+
+  rels.ele("Relationship", {
+    Id: "rId1",
+    Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+    Target: "word/document.xml",
+  });
+
+  return rels.end({ prettyPrint: true });
+}
+
+function mapRgbToHighlight(rgb: string): string | null {
+  const hex = rgb.replace("#", "").toUpperCase();
+  const colorMap: Record<string, string> = {
+    FFFF00: "yellow",
+    "00FF00": "green",
+    "00FFFF": "cyan",
+    FF00FF: "magenta",
+    "0000FF": "blue",
+    FF0000: "red",
+  };
+  return colorMap[hex] || null;
+}
+
+function getImageExtension(source: string): string {
+  const src = source.toLowerCase();
+  if (src.includes("image/png") || src.includes(".png")) return "png";
+  if (src.includes("image/jpeg") || src.includes(".jpg")) return "jpg";
+  if (src.includes("image/gif") || src.includes(".gif")) return "gif";
+  return "png";
+}
+
+export const buildDocx = buildDocxFromUniverData;
