@@ -593,8 +593,15 @@ async function convertOOXMLToBody(
             : null;
 
           if (abstractLevels) {
+            // Determine list type from the first level's glyphType (0 = bullet, 1 = ordered)
+            const firstLevelGlyphType =
+              abstractLevels[0]?.glyphType ??
+              (abstractLevels[0]?.numFmt === "bullet" ? 0 : 1);
+            const listTypeValue =
+              firstLevelGlyphType === 0 ? "BULLET_LIST" : "ORDER_LIST";
+
             lists[listId] = {
-              listType: listId,
+              listType: listTypeValue,
               // biome-ignore lint/suspicious/noExplicitAny: Nesting level structure
               nestingLevel: abstractLevels.map(
                 (lvlDef: any, level: number) => ({
@@ -610,16 +617,17 @@ async function convertOOXMLToBody(
               ),
             };
           } else {
+            // Default to bullet list when no abstract levels are defined
             lists[listId] = {
-              listType: listId,
+              listType: "BULLET_LIST",
               nestingLevel: Array.from({ length: 9 }, (_, level) => ({
                 bulletAlignment: 0,
                 glyphFormat: "•",
                 startNumber: 0,
                 glyphType: 0,
                 textStyle: { fs: 11 },
-                hanging: 24,
-                indentStart: 36 * (level + 1),
+                hanging: { v: 24 },
+                indentStart: { v: 36 * (level + 1) },
               })),
             };
           }
@@ -901,12 +909,11 @@ async function convertOOXMLToBody(
       };
 
       if (levelDef) {
-        paragraph.paragraphStyle.indentStart = {
-          v: levelDef.indentStart || 36 * (bullet.nestingLevel + 1),
+        // levelDef.indentStart and levelDef.hanging are already { v: number } objects
+        paragraph.paragraphStyle.indentStart = levelDef.indentStart || {
+          v: 36 * (bullet.nestingLevel + 1),
         };
-        paragraph.paragraphStyle.hanging = {
-          v: levelDef.hanging || 24,
-        };
+        paragraph.paragraphStyle.hanging = levelDef.hanging || { v: 24 };
       } else {
         paragraph.paragraphStyle.indentStart = {
           v: 36 * (bullet.nestingLevel + 1),
