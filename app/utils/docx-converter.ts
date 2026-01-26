@@ -600,6 +600,8 @@ async function convertOOXMLToBody(
             const listTypeValue =
               firstLevelGlyphType === 0 ? "BULLET_LIST" : "ORDER_LIST";
 
+        
+
             lists[listId] = {
               listType: listTypeValue,
               // biome-ignore lint/suspicious/noExplicitAny: Nesting level structure
@@ -908,6 +910,7 @@ async function convertOOXMLToBody(
       };
 
       if (levelDef) {
+      
         // levelDef.indentStart and levelDef.hanging are already { v: number } objects
         paragraph.paragraphStyle.indentStart = levelDef.indentStart || {
           v: 36 * (bullet.nestingLevel + 1),
