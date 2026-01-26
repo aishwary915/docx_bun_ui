@@ -19,6 +19,7 @@
     "@univerjs/preset-docs-core": "^0.15.3",
     "@univerjs/preset-sheets-core": "^0.15.3",
     "@univerjs/presets": "^0.15.3",
+    "@vercel/react-router": "^1.2.5",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "docx": "^9.5.1",
