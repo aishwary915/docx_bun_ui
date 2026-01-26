@@ -11,4 +11,17 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./app"),
     },
   },
+  ssr: {
+    // Exclude browser-only Univer packages from server-side bundle
+    noExternal: [],
+    external: [
+      "@univerjs/core",
+      "@univerjs/docs",
+      "@univerjs/docs-ui",
+      "@univerjs/engine-render",
+      "@univerjs/presets",
+      "@univerjs/preset-docs-core",
+      "@univerjs/preset-sheets-core",
+    ],
+  },
 });
