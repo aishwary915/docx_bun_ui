@@ -1,5 +1,6 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, lazy, Suspense } from "react";
 import { useDropzone } from "react-dropzone";
+import type { ClientLoaderFunctionArgs } from "react-router";
 import {
   Card,
   CardContent,
@@ -21,8 +22,15 @@ import {
   CloudUpload,
   Edit3,
 } from "lucide-react";
-import { UniverDocEditor } from "~/components/ui/UniverDocEditor";
-import { UniverXlsxEditor } from "~/components/ui/UniverXlsxEditor";
+
+// Lazy load Univer components to prevent SSR issues
+const UniverDocEditor = lazy(() => import("~/components/ui/UniverDocEditor").then(m => ({ default: m.UniverDocEditor })));
+const UniverXlsxEditor = lazy(() => import("~/components/ui/UniverXlsxEditor").then(m => ({ default: m.UniverXlsxEditor })));
+
+// This ensures the route is only rendered on the client
+export async function clientLoader({}: ClientLoaderFunctionArgs) {
+  return null;
+}
 
 interface UploadedFile {
   file: File;
@@ -160,15 +168,17 @@ function DocViewer() {
 
         {/* Univer Editor */}
         <div className="flex-1 overflow-hidden">
-          {isXlsx ? (
-            <UniverXlsxEditor url={fileUrl} filename={editingFile.name} />
-          ) : isDocx ? (
-            <UniverDocEditor initialFile={editingFile} />
-          ) : (
-            <div className="flex h-full items-center justify-center">
-              <p className="text-muted-foreground">Unsupported file type for editing</p>
-            </div>
-          )}
+          <Suspense fallback={<div className="flex h-full items-center justify-center"><p>Loading editor...</p></div>}>
+            {isXlsx ? (
+              <UniverXlsxEditor url={fileUrl} filename={editingFile.name} />
+            ) : isDocx ? (
+              <UniverDocEditor initialFile={editingFile} />
+            ) : (
+              <div className="flex h-full items-center justify-center">
+                <p className="text-muted-foreground">Unsupported file type for editing</p>
+              </div>
+            )}
+          </Suspense>
         </div>
       </div>
     );
