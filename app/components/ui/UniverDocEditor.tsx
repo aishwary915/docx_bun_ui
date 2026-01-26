@@ -1,10 +1,10 @@
 // Import styles for preset mode
 import "@univerjs/preset-docs-core/lib/index.css";
-import { Upload, Download } from "lucide-react";
+import { Download, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { convertDocxToUniverData } from "~/utils/docx-converter";
 import { CustomQuickInsertPlugin } from "~/plugins/CustomQuickInsertPlugin";
+import { convertDocxToUniverData } from "~/utils/docx-converter";
 import CustomQuickInsertMenu from "../CustomQuickInsertMenu";
 
 interface UniverDocEditorProps {
@@ -518,13 +518,20 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
       }
 
       const snapshot = activeDoc.getSnapshot();
-      console.log("[DOCX Export] Got snapshot:", {
+      
+      // Log full IDocumentData contents
+      console.log("[DOCX Export] ========== FULL IDocumentData Contents ==========");
+      console.log("[DOCX Export] Complete snapshot object:", snapshot);
+      console.log("[DOCX Export] Pretty printed:", JSON.stringify(snapshot, null, 2));
+      
+      console.log("[DOCX Export] Quick summary:", {
         textRuns: snapshot.body?.textRuns?.length || 0,
         dataStreamLength: snapshot.body?.dataStream?.length || 0,
         paragraphs: snapshot.body?.paragraphs?.length || 0,
         dataStreamPreview: snapshot.body?.dataStream?.substring(0, 200) || "empty",
         dataStreamEndPreview: snapshot.body?.dataStream?.substring(Math.max(0, (snapshot.body?.dataStream?.length || 0) - 50)) || "empty",
       });
+      console.log("[DOCX Export] ===================================================");
 
       // Prepare filename
       const exportFileName = fileName

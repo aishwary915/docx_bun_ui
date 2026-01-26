@@ -1,9 +1,9 @@
 // DOCX OOXML Builder - Converts Univer IDocumentData to DOCX format
 // High-fidelity export with proper tables, images, text formatting, and lists
 
+import type { IDocumentData } from "@univerjs/core";
 import JSZip from "jszip";
 import { create } from "xmlbuilder2";
-import type { IDocumentData } from "@univerjs/core";
 
 // Image counter for relationship IDs
 let globalImageCounter = 1;
@@ -870,10 +870,19 @@ function getCellContent(
 }
 
 function addParagraphProperties(pPr: any, style: any): void {
-  // Alignment
+  // Alignment - Univer uses: undefined=left, 2=center, 3=right, 4=justify
   if (style.horizontalAlign !== undefined) {
-    const alignMap = ["left", "center", "right", "both"];
-    pPr.ele("w:jc", { "w:val": alignMap[style.horizontalAlign] || "left" });
+    // Map Univer alignment values to OOXML alignment strings
+    const alignMap: Record<number, string> = {
+      2: "center",   // Univer 2 = center
+      3: "right",    // Univer 3 = right
+      4: "both",     // Univer 4 = justify
+    };
+    const alignment = alignMap[style.horizontalAlign];
+    if (alignment) {
+      pPr.ele("w:jc", { "w:val": alignment });
+    }
+    // If horizontalAlign is undefined or 0 or 1, omit w:jc (defaults to left)
   }
 
   // Spacing - combine into single element

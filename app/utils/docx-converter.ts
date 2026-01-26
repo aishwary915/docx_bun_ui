@@ -127,7 +127,7 @@ export async function convertDocxToUniverData(
     stylesDoc,
     relationships,
   );
-
+  
   // Build final IDocumentData structure
   const documentData: IDocumentData = {
     id: `doc_${Date.now()}_${Math.random().toString(36).substring(7)}`,
@@ -448,47 +448,44 @@ async function convertOOXMLToBody(
     }
 
     // Parse text alignment with enhanced detection
+    // UNIVER ALIGNMENT MAPPING (verified from export):
+    // - undefined/omitted = Left (default)
+    // - 2 = Center
+    // - 3 = Right
+    // - 4 = Justify (assumed)
     let textAlignment: number | undefined;
 
     if (pPr?.["w:jc"]?.["@_w:val"]) {
       const jc = pPr["w:jc"]["@_w:val"];
-      const alignMap: Record<string, number> = {
-        left: 0,
-        start: 0,     // "start" means left in LTR languages
-        center: 1,
-        right: 2,
-        end: 2,       // "end" means right in LTR languages
-        both: 3,
-        justify: 3,
-        distribute: 3,
+      const alignMap: Record<string, number | undefined> = {
+        left: undefined,      // Left is omitted in Univer
+        start: undefined,     // "start" means left in LTR languages
+        center: 2,            // Center = 2 in Univer
+        right: 3,             // Right = 3 in Univer
+        end: 3,               // "end" means right in LTR languages
+        both: 4,              // Justify = 4 (assumed)
+        justify: 4,
+        distribute: 4,
       };
       textAlignment = alignMap[jc];
-      console.log(`✓ Paragraph alignment detected: "${jc}" → ${textAlignment} (0=left, 1=center, 2=right, 3=justify)`);
+      console.log(`✓ Paragraph alignment detected: "${jc}" → ${textAlignment === undefined ? 'undefined (left)' : textAlignment} (undefined=left, 2=center, 3=right, 4=justify)`);
     } else if (styleVal && styleMap.has(styleVal)) {
       const styleData = styleMap.get(styleVal);
       const stylePPr = styleData?.pPr;
       if (stylePPr?.["w:jc"]?.["@_w:val"]) {
         const jc = stylePPr["w:jc"]["@_w:val"];
-        const alignMap: Record<string, number> = {
-          left: 0,
-          start: 0,
-          center: 1,
-          right: 2,
-          end: 2,
-          both: 3,
-          justify: 3,   
-          distribute: 3,
+        const alignMap: Record<string, number | undefined> = {
+          left: undefined,
+          start: undefined,
+          center: 2,
+          right: 3,
+          end: 3,
+          both: 4,
+          justify: 4,   
+          distribute: 4,
         };
         textAlignment = alignMap[jc];
-        console.log(`✓ Style-based alignment for "${styleVal}": "${jc}" → ${textAlignment}`);
-      }
-    }
-
-    // Check for title/heading center alignment in document defaults
-    if (textAlignment === undefined && isHeading) {
-      // Many documents have implicit center alignment for titles/headings
-      if (styleVal === "Title") {
-        textAlignment = 1; // Center
+        console.log(`✓ Style-based alignment for "${styleVal}": "${jc}" → ${textAlignment === undefined ? 'undefined (left)' : textAlignment}`);
       }
     }
 
@@ -872,9 +869,13 @@ async function convertOOXMLToBody(
     if (textAlignment !== undefined) {
       paragraph.paragraphStyle.horizontalAlign = textAlignment;
       console.log(`✓ Applied alignment ${textAlignment} to paragraph at index ${paragraphStartIndex}`);
+      console.log(`   Paragraph text preview:`, dataStream.substring(Math.max(0, paragraphStartIndex - 20), paragraphStartIndex + 20).replace(/\r/g, '\\r'));
     } else {
-      paragraph.paragraphStyle.horizontalAlign = 0; // Default to left
-      console.log(`⚠️ No alignment detected, defaulting to left (0) for paragraph at index ${paragraphStartIndex}`);
+      // IMPORTANT: Check exported IDocumentData to see if Univer uses undefined or 0 for default alignment
+      console.log(`⚠️ No alignment specified for paragraph at index ${paragraphStartIndex} - NOT setting horizontalAlign (will be undefined)`);
+      console.log(`   Paragraph text preview:`, dataStream.substring(Math.max(0, paragraphStartIndex - 20), paragraphStartIndex + 20).replace(/\r/g, '\\r'));
+      // DO NOT set a default value - let Univer handle it
+      // If Univer exports show horizontalAlign is omitted for left-aligned text, we should also omit it
     }
 
     if (indentStart) paragraph.paragraphStyle.indentStart = indentStart;
@@ -922,7 +923,7 @@ async function convertOOXMLToBody(
     console.warn("⚠️ No paragraphs found, creating default paragraph");
     dataStream = "Default Document Content\r";
     textRuns.push({ st: 0, ed: 23, ts: {} });
-    paragraphs.push({ startIndex: 0, paragraphStyle: { horizontalAlign: 0 } });
+    paragraphs.push({ startIndex: 0, paragraphStyle: {} }); // No horizontalAlign = left by default
   }
 
   // Ensure document ends with proper Univer structure
@@ -936,7 +937,7 @@ async function convertOOXMLToBody(
     textRuns.length = 0; // Clear array
     textRuns.push({ st: 0, ed: dataStream.length - 1, ts: {} });
     paragraphs.length = 0; // Clear array
-    paragraphs.push({ startIndex: 0, paragraphStyle: { horizontalAlign: 0 } });
+    paragraphs.push({ startIndex: 0, paragraphStyle: {} }); // No horizontalAlign = left by default
   } else if (!dataStream.endsWith("\r")) {
     dataStream += "\r";
   }
