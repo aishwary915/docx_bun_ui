@@ -315,34 +315,21 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
           console.log(`🔧 Applying alignment fix to ${paragraphs.length} paragraphs`);
 
           try {
-            // Dynamically import the CommonJS module to avoid SSR issues
-            const univerDocsModule = await import("@univerjs/docs");
-            const SetParagraphAlignCommand = univerDocsModule.SetParagraphAlignCommand;
+            // Alignment is already applied during import in docx-converter.ts
+            // No need to re-apply alignment via SetParagraphAlignCommand
+            // (SetParagraphAlignCommand doesn't exist in @univerjs/docs v0.15.x)
 
-            paragraphs.forEach((p, index) => {
+            paragraphs.forEach((p: any, index: number) => {
               const alignment = p.paragraphStyle?.horizontalAlign;
               if (alignment !== undefined && alignment !== 0) {
-                // Only re-apply non-left alignments (center, right, justify)
-                console.log(`  → Paragraph ${index} at ${p.startIndex}: applying alignment ${alignment}`);
-                try {
-                  api.executeCommand(SetParagraphAlignCommand.id, {
-                    alignType: alignment, // 0=left, 1=center, 2=right, 3=justify
-                    ranges: [
-                      {
-                        startOffset: p.startIndex,
-                        endOffset: p.startIndex + 1,
-                      },
-                    ],
-                  });
-                } catch (err) {
-                  console.error(`  ✗ Failed to apply alignment to paragraph ${index}:`, err);
-                }
+                // Alignment is already in the data from import
+                console.log(`  ✓ Paragraph ${index} at ${p.startIndex}: has alignment ${alignment}`);
               }
             });
 
-            console.log("✅ Alignment fix applied");
+            console.log("✅ Alignment check completed");
           } catch (err) {
-            console.error("❌ Failed to import alignment command:", err);
+            console.error("❌ Error checking alignment:", err);
           }
         };
 

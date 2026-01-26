@@ -600,6 +600,8 @@ async function convertOOXMLToBody(
             const listTypeValue =
               firstLevelGlyphType === 0 ? "BULLET_LIST" : "ORDER_LIST";
 
+        
+
             lists[listId] = {
               listType: listTypeValue,
               // biome-ignore lint/suspicious/noExplicitAny: Nesting level structure
@@ -617,8 +619,7 @@ async function convertOOXMLToBody(
               ),
             };
           } else {
-            // Default to bullet list when no abstract levels are defined
-            lists[listId] = {
+           lists[listId] = {
               listType: "BULLET_LIST",
               nestingLevel: Array.from({ length: 9 }, (_, level) => ({
                 bulletAlignment: 0,
@@ -909,6 +910,7 @@ async function convertOOXMLToBody(
       };
 
       if (levelDef) {
+      
         // levelDef.indentStart and levelDef.hanging are already { v: number } objects
         paragraph.paragraphStyle.indentStart = levelDef.indentStart || {
           v: 36 * (bullet.nestingLevel + 1),
