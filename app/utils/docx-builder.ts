@@ -304,6 +304,85 @@ function buildDocumentXml(
   const processedParagraphs = new Set<number>();
   let currentIndex = 0;
 
+  // Handle content before first paragraph (if any)
+  const firstParaStart = paragraphs.length > 0 ? paragraphs[0].startIndex : dataStream.length;
+  if (currentIndex < firstParaStart) {
+    const preParaText = dataStream.substring(currentIndex, firstParaStart);
+    const cleanPreParaText = preParaText.replace(/[\x00-\x1F]/g, "");
+    
+    if (cleanPreParaText.length > 0) {
+      console.log(
+        `[DOCX Export] Found ${cleanPreParaText.length} chars before first paragraph (0-${firstParaStart}): "${cleanPreParaText.substring(0, 50)}..."`
+      );
+      
+      const p = doc.ele("w:p");
+      const pPr = p.ele("w:pPr");
+      
+      // Get formatting from text runs that overlap with this range
+      const preRuns = textRuns.filter(
+        (run: any) => run.st < firstParaStart && run.ed > 0
+      );
+      
+      if (preRuns.length > 0) {
+        // Build formatting map
+        const charFormatMap = new Map<number, any>();
+        preRuns.forEach((run: any) => {
+          const runStartInRange = Math.max(run.st, 0);
+          const runEndInRange = Math.min(run.ed, firstParaStart);
+          for (let i = runStartInRange; i < runEndInRange; i++) {
+            charFormatMap.set(i, run.ts);
+          }
+        });
+        
+        // Split into runs based on formatting
+        let runStart = 0;
+        let currentStyle = charFormatMap.get(0);
+        let currentRunText = "";
+        
+        for (let i = 0; i < firstParaStart; i++) {
+          const charStyle = charFormatMap.get(i);
+          const char = dataStream[i];
+          const styleChanged = JSON.stringify(charStyle) !== JSON.stringify(currentStyle);
+          
+          if (styleChanged && currentRunText.length > 0) {
+            const cleanText = currentRunText.replace(/[\x00-\x1F]/g, "");
+            if (cleanText.length > 0) {
+              const r = p.ele("w:r");
+              if (currentStyle && Object.keys(currentStyle).length > 0) {
+                const rPr = r.ele("w:rPr");
+                addRunProperties(rPr, currentStyle);
+              }
+              r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
+            }
+            currentRunText = char;
+            currentStyle = charStyle;
+          } else {
+            currentRunText += char;
+          }
+        }
+        
+        // Output final run
+        if (currentRunText.length > 0) {
+          const cleanText = currentRunText.replace(/[\x00-\x1F]/g, "");
+          if (cleanText.length > 0) {
+            const r = p.ele("w:r");
+            if (currentStyle && Object.keys(currentStyle).length > 0) {
+              const rPr = r.ele("w:rPr");
+              addRunProperties(rPr, currentStyle);
+            }
+            r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
+          }
+        }
+      } else {
+        // No formatting - use default
+        const r = p.ele("w:r");
+        r.ele("w:t", { "xml:space": "preserve" }).txt(cleanPreParaText);
+      }
+    }
+    
+    currentIndex = firstParaStart;
+  }
+
   // Process content in document order
   while (currentIndex < dataStream.length && paragraphs.length > 0) {
     // Check if we're at a table position
@@ -368,114 +447,120 @@ function buildDocumentXml(
       addBulletProperties(pPr, para.bullet);
     }
 
-    // Process paragraph content - include runs that overlap with this paragraph
+    // CRITICAL: Always extract paragraph text from dataStream for accuracy
+    // After editing, text runs may be sparse/consolidated, so we must use dataStream as source of truth
+    const paraText = dataStream.substring(paraStart, paraEnd);
+    const cleanParaText = paraText.replace(/[\x00-\x1F]/g, ""); // Remove control chars
+    
+    // Get runs that overlap with this paragraph (for formatting)
     const paraRuns = textRuns.filter(
       (run: any) => run.st < paraEnd && run.ed > paraStart
     );
 
-    if (paraRuns.length === 0) {
-      // Check if there's an image in this paragraph
-      const imgPos = imageMarkerPositions.find(
-        (pos) => pos >= paraStart && pos < paraEnd
+    if (cleanParaText.length === 0) {
+      // Empty paragraph
+      p.ele("w:r");
+    } else if (paraRuns.length === 0) {
+      // No formatting runs - use default styling
+      const r = p.ele("w:r");
+      const rPr = r.ele("w:rPr");
+      rPr.ele("w:rFonts", {
+        "w:ascii": "Calibri",
+        "w:hAnsi": "Calibri",
+        "w:cs": "Calibri",
+      });
+      rPr.ele("w:sz", { "w:val": "22" }); // 11pt
+      rPr.ele("w:szCs", { "w:val": "22" });
+      r.ele("w:t", { "xml:space": "preserve" }).txt(cleanParaText);
+      
+      console.log(
+        `[DOCX Export] Para ${paraStart}-${paraEnd}: no runs, output ${cleanParaText.length} chars with default style`
       );
-      if (imgPos !== undefined) {
-        const imgInfo = imageAtPosition.get(imgPos);
-        if (imgInfo) {
-          addImageToRun(p, imgInfo);
-        }
-      } else {
-        // Empty paragraph - add empty run
-        p.ele("w:r");
-      }
     } else {
-      // Process runs, checking for images between/within runs
-      let lastRunEnd = paraStart;
-
+      // We have formatting runs - apply them to the paragraph text
+      // Build a formatting map: position -> text style
+      const charFormatMap = new Map<number, any>();
+      
       paraRuns.forEach((run: any) => {
-        // Clip run to paragraph boundaries
-        const runStart = Math.max(run.st, paraStart);
-        const runEnd = Math.min(run.ed, paraEnd);
-
-        // Check for image between last run and this run
-        const imgBetween = imageMarkerPositions.find(
-          (pos) => pos >= lastRunEnd && pos < runStart
-        );
-        if (imgBetween !== undefined) {
-          const imgInfo = imageAtPosition.get(imgBetween);
-          if (imgInfo) {
-            addImageToRun(p, imgInfo);
-          }
+        const runStartInPara = Math.max(run.st, paraStart);
+        const runEndInPara = Math.min(run.ed, paraEnd);
+        
+        for (let i = runStartInPara; i < runEndInPara; i++) {
+          charFormatMap.set(i, run.ts);
         }
-
-        // Get run text from the clipped range, filtering out control characters
-        const runText = dataStream.substring(runStart, runEnd);
-
-        // Check if this run contains an image marker
-        const imgInRun = imageMarkerPositions.find(
-          (pos) => pos >= runStart && pos < runEnd
-        );
-
-        if (imgInRun !== undefined) {
-          const imgInfo = imageAtPosition.get(imgInRun);
-
-          // Text before image
-          const beforeImg = runText.substring(0, imgInRun - runStart);
-          if (beforeImg && beforeImg.replace(/[\x00-\x1F]/g, "").length > 0) {
-            const r1 = p.ele("w:r");
-            if (run.ts && Object.keys(run.ts).length > 0) {
-              const rPr = r1.ele("w:rPr");
-              addRunProperties(rPr, run.ts);
-            }
-            r1.ele("w:t", { "xml:space": "preserve" }).txt(
-              beforeImg.replace(/[\x00-\x1F]/g, "")
-            );
-          }
-
-          // Add image
-          if (imgInfo) {
-            addImageToRun(p, imgInfo);
-          }
-
-          // Text after image
-          const afterImg = runText.substring(imgInRun - runStart + 1);
-          if (afterImg && afterImg.replace(/[\x00-\x1F]/g, "").length > 0) {
-            const r2 = p.ele("w:r");
-            if (run.ts && Object.keys(run.ts).length > 0) {
-              const rPr = r2.ele("w:rPr");
-              addRunProperties(rPr, run.ts);
-            }
-            r2.ele("w:t", { "xml:space": "preserve" }).txt(
-              afterImg.replace(/[\x00-\x1F]/g, "")
-            );
-          }
-        } else {
-          // Regular text run - filter control characters
-          const cleanText = runText.replace(/[\x00-\x1F]/g, "");
+      });
+      
+      // Split paragraph text into runs based on formatting changes
+      let currentPos = paraStart;
+      let currentStyle = charFormatMap.get(currentPos);
+      let currentRunText = "";
+      
+      for (let i = paraStart; i < paraEnd; i++) {
+        const charStyle = charFormatMap.get(i);
+        const char = dataStream[i];
+        
+        // Check if we should start a new run (style changed)
+        const styleChanged = JSON.stringify(charStyle) !== JSON.stringify(currentStyle);
+        
+        if (styleChanged && currentRunText.length > 0) {
+          // Output current run
+          const cleanText = currentRunText.replace(/[\x00-\x1F]/g, "");
           if (cleanText.length > 0) {
             const r = p.ele("w:r");
-
-            if (run.ts && Object.keys(run.ts).length > 0) {
+            
+            if (currentStyle && Object.keys(currentStyle).length > 0) {
               const rPr = r.ele("w:rPr");
-              addRunProperties(rPr, run.ts);
+              addRunProperties(rPr, currentStyle);
+            } else {
+              // Default styling
+              const rPr = r.ele("w:rPr");
+              rPr.ele("w:rFonts", {
+                "w:ascii": "Calibri",
+                "w:hAnsi": "Calibri",
+                "w:cs": "Calibri",
+              });
+              rPr.ele("w:sz", { "w:val": "22" });
+              rPr.ele("w:szCs", { "w:val": "22" });
             }
-
+            
             r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
           }
-        }
-
-        lastRunEnd = runEnd;
-      });
-
-      // Check for image after last run
-      const imgAfter = imageMarkerPositions.find(
-        (pos) => pos >= lastRunEnd && pos < paraEnd
-      );
-      if (imgAfter !== undefined) {
-        const imgInfo = imageAtPosition.get(imgAfter);
-        if (imgInfo) {
-          addImageToRun(p, imgInfo);
+          
+          // Start new run
+          currentRunText = char;
+          currentStyle = charStyle;
+        } else {
+          currentRunText += char;
         }
       }
+      
+      // Output final run
+      if (currentRunText.length > 0) {
+        const cleanText = currentRunText.replace(/[\x00-\x1F]/g, "");
+        if (cleanText.length > 0) {
+          const r = p.ele("w:r");
+          
+          if (currentStyle && Object.keys(currentStyle).length > 0) {
+            const rPr = r.ele("w:rPr");
+            addRunProperties(rPr, currentStyle);
+          } else {
+            const rPr = r.ele("w:rPr");
+            rPr.ele("w:rFonts", {
+              "w:ascii": "Calibri",
+              "w:hAnsi": "Calibri",
+              "w:cs": "Calibri",
+            });
+            rPr.ele("w:sz", { "w:val": "22" });
+            rPr.ele("w:szCs", { "w:val": "22" });
+          }
+          
+          r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
+        }
+      }
+      
+      console.log(
+        `[DOCX Export] Para ${paraStart}-${paraEnd}: built from dataStream with ${paraRuns.length} formatting runs`
+      );
     }
 
     processedParagraphs.add(para.startIndex);

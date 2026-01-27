@@ -555,13 +555,17 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
       console.log("[DOCX Export] File received, size:", blob.size, "bytes");
 
       // Download using file-saver
-      const FileSaver = await import("file-saver");
-      FileSaver.saveAs(blob, exportFileName);
-      
-      console.log(
-        "[DOCX Export] ✓ Document exported successfully via SERVER as",
-        exportFileName
-      );
+      try {
+        const { saveAs } = await import("file-saver");
+        saveAs(blob, exportFileName);
+        console.log(
+          "[DOCX Export] ✓ Document exported successfully via SERVER as",
+          exportFileName
+        );
+      } catch (downloadErr) {
+        console.error("[DOCX Export] File download failed:", downloadErr);
+        throw new Error(`Failed to download file: ${downloadErr}`);
+      }
     } catch (err) {
       console.error("[DOCX Export] Failed:", err);
       setError(
