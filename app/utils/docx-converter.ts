@@ -347,7 +347,7 @@ async function convertOOXMLToBody(
     );
   }
 
-  // Process each paragraph
+  // Process each paragrap
   for (let childIndex = 0; childIndex < bodyChildren.length; childIndex++) {
     const child = bodyChildren[childIndex];
     if (child.type !== "paragraph") continue;
