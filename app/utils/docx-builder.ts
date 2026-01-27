@@ -927,22 +927,32 @@ function addParagraphProperties(pPr: any, style: any): void {
     pPr.ele("w:ind", indAttrs);
   }
 
-  // Paragraph borders
-  if (style.border) {
+  // Paragraph borders - handle both nested (style.border.bottom) and direct (style.borderBottom) formats
+  // Univer horizontal lines use direct borderBottom property
+  const hasBorderBottom = style.border?.bottom || style.borderBottom;
+  const hasBorderTop = style.border?.top || style.borderTop;
+
+  if (hasBorderBottom || hasBorderTop) {
     const pBdr = pPr.ele("w:pBdr");
-    if (style.border.bottom) {
+
+    if (hasBorderBottom) {
+      const border = style.border?.bottom || style.borderBottom;
+      // For horizontal lines, use a larger space value for better visual separation
+      const spaceValue = style.borderBottom ? "12" : "1";
       pBdr.ele("w:bottom", {
         "w:val": "single",
-        "w:sz": Math.round((style.border.bottom.w || 1) * 8).toString(),
-        "w:color": (style.border.bottom.cl?.rgb || "#000000").replace("#", ""),
-        "w:space": "1",
+        "w:sz": Math.round((border.w || border.s || 1) * 8).toString(),
+        "w:color": (border.cl?.rgb || border.color?.rgb || "#CDD0D8").replace("#", ""),
+        "w:space": spaceValue,
       });
     }
-    if (style.border.top) {
+
+    if (hasBorderTop) {
+      const border = style.border?.top || style.borderTop;
       pBdr.ele("w:top", {
         "w:val": "single",
-        "w:sz": Math.round((style.border.top.w || 1) * 8).toString(),
-        "w:color": (style.border.top.cl?.rgb || "#000000").replace("#", ""),
+        "w:sz": Math.round((border.w || border.s || 1) * 8).toString(),
+        "w:color": (border.cl?.rgb || border.color?.rgb || "#000000").replace("#", ""),
         "w:space": "1",
       });
     }

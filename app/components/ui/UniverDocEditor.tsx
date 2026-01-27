@@ -4,8 +4,10 @@ import { Download, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { CustomQuickInsertPlugin } from "~/plugins/CustomQuickInsertPlugin";
+import { HorizontalLineSpacingPlugin } from "~/plugins/HorizontalLineSpacingPlugin";
 import { convertDocxToUniverData } from "~/utils/docx-converter";
 import CustomQuickInsertMenu from "../CustomQuickInsertMenu";
+
 
 interface UniverDocEditorProps {
   initialFile?: File;
@@ -99,6 +101,10 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
         univer.registerPlugin(CustomQuickInsertPlugin);
         console.log("✅ CustomQuickInsertPlugin registered successfully");
 
+        // Register the HorizontalLineSpacingPlugin for improved horizontal line spacing
+        univer.registerPlugin(HorizontalLineSpacingPlugin);
+        console.log("✅ HorizontalLineSpacingPlugin registered successfully");
+
         univerAPIRef.current = univerAPI;
         univerInstanceRef.current = univer;
 
@@ -119,20 +125,20 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
           const { bounds } = event.detail;
           if (bounds) {
             const univerContainer = containerRef.current;
-            
+
             if (univerContainer) {
               const canvasElement = univerContainer.querySelector(
                 "canvas"
               ) as HTMLCanvasElement | null;
-              
+
               if (canvasElement) {
                 const canvasRect = canvasElement.getBoundingClientRect();
-                
+
                 // Find ANY scrollable parent element
                 let scrollTop = 0;
                 let scrollLeft = 0;
                 let scrollableElement: HTMLElement | null = null;
-                
+
                 // Check all parent elements for scroll
                 let element: HTMLElement | null = canvasElement.parentElement;
                 while (element && element !== document.body) {
@@ -141,7 +147,7 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
                   const computedStyle = window.getComputedStyle(element);
                   const overflowY = computedStyle.overflowY;
                   const overflowX = computedStyle.overflowX;
-                  
+
                   if (
                     (hasVerticalScroll && (overflowY === 'auto' || overflowY === 'scroll')) ||
                     (hasHorizontalScroll && (overflowX === 'auto' || overflowX === 'scroll'))
@@ -160,21 +166,21 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
                   }
                   element = element.parentElement;
                 }
-                
+
                 console.log("[UniverDocEditor] Canvas rect:", canvasRect);
                 console.log("[UniverDocEditor] Raw bounds:", bounds);
                 console.log("[UniverDocEditor] Final scroll offset:", { scrollTop, scrollLeft });
-                
+
                 // Calculate viewport coordinates
                 const viewportX = canvasRect.left + bounds.left - scrollLeft;
                 const viewportY = canvasRect.top + bounds.bottom - scrollTop + 5;
-                
+
                 console.log(
                   "[UniverDocEditor] Viewport position:",
                   viewportX,
                   viewportY
                 );
-                
+
                 setMenuPosition({ x: viewportX, y: viewportY });
                 setMenuVisible(true);
               } else {
@@ -429,8 +435,8 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
         univerAPIRef.current = null;
       }
       // Cleanup event listeners
-      window.removeEventListener("univer:quick-insert-show", () => {});
-      window.removeEventListener("univer:quick-insert-close", () => {});
+      window.removeEventListener("univer:quick-insert-show", () => { });
+      window.removeEventListener("univer:quick-insert-close", () => { });
     };
   }, [documentData]);
 
@@ -480,7 +486,7 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
   const handleExport = async () => {
     try {
       console.log("[DOCX Export] Starting SERVER-SIDE export...");
-      
+
       if (!univerAPIRef.current) {
         setError("Editor not initialized");
         return;
@@ -495,7 +501,7 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
       // CRITICAL FIX: Force document to commit any pending edits before snapshot
       // This ensures getSnapshot() includes the very latest user changes
       console.log("[DOCX Export] Flushing pending edits...");
-      
+
       // Trigger a blur event to force Univer to commit any buffered text
       const editorElement = document.querySelector('.univer-render-canvas');
       if (editorElement) {
@@ -505,12 +511,12 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
       }
 
       const snapshot = activeDoc.getSnapshot();
-      
+
       // Log full IDocumentData contents
       console.log("[DOCX Export] ========== FULL IDocumentData Contents ==========");
       console.log("[DOCX Export] Complete snapshot object:", snapshot);
       console.log("[DOCX Export] Pretty printed:", JSON.stringify(snapshot, null, 2));
-      
+
       console.log("[DOCX Export] Quick summary:", {
         textRuns: snapshot.body?.textRuns?.length || 0,
         dataStreamLength: snapshot.body?.dataStream?.length || 0,
@@ -543,7 +549,7 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(
           errorData.message ||
-            `Server error: ${response.status} ${response.statusText}`
+          `Server error: ${response.status} ${response.statusText}`
         );
       }
 
@@ -557,7 +563,7 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
       // Download using file-saver
       const FileSaver = await import("file-saver");
       FileSaver.saveAs(blob, exportFileName);
-      
+
       console.log(
         "[DOCX Export] ✓ Document exported successfully via SERVER as",
         exportFileName
@@ -566,7 +572,7 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
       console.error("[DOCX Export] Failed:", err);
       setError(
         "Failed to export document: " +
-          (err instanceof Error ? err.message : String(err))
+        (err instanceof Error ? err.message : String(err))
       );
     }
   };
