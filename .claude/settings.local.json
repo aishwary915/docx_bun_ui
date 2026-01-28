@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(npm run build:*)",
+      "WebFetch(domain:reference.univer.ai)",
+      "WebFetch(domain:docs.univer.ai)",
+      "WebFetch(domain:univer.ai)",
+      "WebSearch",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
