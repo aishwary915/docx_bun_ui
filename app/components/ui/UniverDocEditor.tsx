@@ -178,9 +178,10 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
                 console.log("[UniverDocEditor] Raw bounds:", bounds);
                 console.log("[UniverDocEditor] Final scroll offset:", { scrollTop, scrollLeft });
 
-                // Calculate viewport coordinates
-                const viewportX = canvasRect.left + bounds.left - scrollLeft;
-                const viewportY = canvasRect.top + bounds.bottom - scrollTop + 5;
+                // Calculate viewport coordinates (bounds are in document space, convert to viewport)
+                // bounds.bottom is absolute document position, subtract scroll to get viewport position
+                const viewportX = bounds.left + canvasRect.left - scrollLeft;
+                const viewportY = bounds.bottom + canvasRect.top - scrollTop + 5;
 
                 console.log(
                   "[UniverDocEditor] Viewport position:",

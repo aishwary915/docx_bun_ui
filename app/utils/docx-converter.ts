@@ -21,10 +21,10 @@ import JSZip from "jszip";
  *
  * KNOWN LIMITATIONS:
  * ==================
- * - Tables are disabled to fix end-of-document typing bug
  * - Images are disabled to fix cursor positioning issues
  * - List bullets are prepended as text due to Univer v0.15.x renderer limitations
  * - Some advanced OOXML features may not be fully supported
+ * - Tables support basic structure (rows, columns, text content) but advanced formatting may be limited
  */
 export async function convertDocxToUniverData(
   arrayBuffer: ArrayBuffer,
@@ -154,11 +154,18 @@ export async function convertDocxToUniverData(
     (documentData as any).lists = bodyData.lists;
   }
 
+  // Add tables if present
+  if (bodyData.tables && Object.keys(bodyData.tables).length > 0) {
+    // biome-ignore lint/suspicious/noExplicitAny: Univer IDocumentData accepts tables property
+    (documentData as any).tables = bodyData.tables;
+  }
+
   console.log("📦 Document converted:", {
     id: documentData.id,
     paragraphs: documentData.body?.paragraphs?.length || 0,
     textRuns: documentData.body?.textRuns?.length || 0,
     lists: Object.keys(bodyData.lists).length,
+    tables: bodyData.tables ? Object.keys(bodyData.tables).length : 0,
   });
 
   return documentData;
@@ -183,6 +190,10 @@ async function convertOOXMLToBody(
   const lists: Record<string, any> = {};
   // biome-ignore lint/suspicious/noExplicitAny: Univer custom range structure
   const customRanges: any[] = []; // For hyperlinks
+  // biome-ignore lint/suspicious/noExplicitAny: Univer table structure
+  const tables: Record<string, any> = {};
+  // biome-ignore lint/suspicious/noExplicitAny: Body tables array
+  const bodyTables: any[] = [];
 
   // Parse styles from styles.xml
   // biome-ignore lint/suspicious/noExplicitAny: Style definition structure is dynamic
@@ -317,7 +328,7 @@ async function convertOOXMLToBody(
     });
   }
 
-  // Get all body children (paragraphs) in document order
+  // Get all body children (paragraphs and tables) in document order
   // biome-ignore lint/suspicious/noExplicitAny: Body child structure
   const bodyChildren: any[] = [];
 
@@ -327,15 +338,28 @@ async function convertOOXMLToBody(
       : [body["w:p"]]
     : [];
 
-  // Parse raw XML to get element order
-  const elementOrderRegex = /<w:p[\s>]/g;
-  let pIndex = 0;
+  const tableElements = body["w:tbl"]
+    ? Array.isArray(body["w:tbl"])
+      ? body["w:tbl"]
+      : [body["w:tbl"]]
+    : [];
 
-  while (elementOrderRegex.exec(rawBodyXml) !== null) {
-    if (pIndex < paragraphElements.length) {
+  // Parse raw XML to get element order (both paragraphs and tables)
+  const elementOrderRegex = /<w:(p|tbl)[\s>]/g;
+  let pIndex = 0;
+  let tIndex = 0;
+  let match;
+
+  while ((match = elementOrderRegex.exec(rawBodyXml)) !== null) {
+    if (match[1] === "p" && pIndex < paragraphElements.length) {
       bodyChildren.push({
         type: "paragraph",
         element: paragraphElements[pIndex++],
+      });
+    } else if (match[1] === "tbl" && tIndex < tableElements.length) {
+      bodyChildren.push({
+        type: "table",
+        element: tableElements[tIndex++],
       });
     }
   }
@@ -345,11 +369,61 @@ async function convertOOXMLToBody(
     paragraphElements.forEach((p) =>
       bodyChildren.push({ type: "paragraph", element: p }),
     );
+    tableElements.forEach((t) =>
+      bodyChildren.push({ type: "table", element: t }),
+    );
   }
 
-  // Process each paragrap
+  console.log(`📊 Body children: ${bodyChildren.length} elements (${paragraphElements.length} paragraphs, ${tableElements.length} tables)`);
+
+  // Process each body element (paragraph or table)
   for (let childIndex = 0; childIndex < bodyChildren.length; childIndex++) {
     const child = bodyChildren[childIndex];
+
+    // Handle table elements
+    if (child.type === "table") {
+      const tableResult = parseTable(child.element, styleMap);
+      if (tableResult) {
+        const tableId = `table_${Object.keys(tables).length + 1}`;
+
+        // Record table start position (where \uFFFC will be)
+        const tableStartIndex = dataStream.length;
+
+        // Insert placeholder character for table anchor (Univer requirement)
+        dataStream += '\uFFFC'; // Object replacement character
+        
+        // Store table position (inclusive of placeholder character)
+        const tableEndIndex = dataStream.length - 1;
+        
+        // Add paragraph break after table
+        dataStream += '\r';
+        
+        // The paragraph marker is at the \r position (after the table)
+        const paragraphIndex = dataStream.length - 1;
+
+        // Create paragraph for the line containing the table
+        paragraphs.push({
+          startIndex: paragraphIndex,
+          paragraphStyle: {
+            spaceAbove: { v: 0 },
+            spaceBelow: { v: 8 },
+            lineSpacing: 1.0,
+          },
+        });
+
+        // Store table metadata
+        tables[tableId] = tableResult;
+        bodyTables.push({
+          startIndex: tableStartIndex,
+          endIndex: tableEndIndex,
+          tableId: tableId,
+        });
+
+        console.log(`📋 Parsed table ${tableId}: ${tableResult.tableRows?.length || 0} rows, ${tableResult.tableColumns?.length || 0} columns`);
+      }
+      continue;
+    }
+
     if (child.type !== "paragraph") continue;
 
     const p = child.element;
@@ -952,8 +1026,12 @@ async function convertOOXMLToBody(
   }
 
   // Add section break
-  const sectionBreakIndex = dataStream.length;
-  dataStream += "\n";
+if (!dataStream.endsWith('\r')) {
+  dataStream += '\r';
+}
+const sectionBreakIndex = dataStream.length;
+dataStream += '\n';
+
 
   const result = {
     body: {
@@ -966,8 +1044,10 @@ async function convertOOXMLToBody(
         },
       ],
       customRanges: customRanges.length > 0 ? customRanges : undefined,
+      tables: bodyTables.length > 0 ? bodyTables : undefined,
     },
     lists,
+    tables: Object.keys(tables).length > 0 ? tables : undefined,
   };
 
   console.log("✅ DOCX conversion complete:");
@@ -979,6 +1059,7 @@ async function convertOOXMLToBody(
         paragraphsCount: paragraphs.length,
         textRunsCount: textRuns.length,
         listsCount: Object.keys(lists || {}).length,
+        tablesCount: Object.keys(tables || {}).length,
         customRangesCount: customRanges.length,
         dataStreamPreview: dataStream
           .substring(0, 200)
@@ -993,4 +1074,395 @@ async function convertOOXMLToBody(
   );
 
   return result;
+}
+
+/**
+ * Parse a DOCX table (w:tbl) element into Univer table format
+ * Returns proper table structure with cell-level body content
+ */
+// biome-ignore lint/suspicious/noExplicitAny: OOXML table structure is dynamic
+function parseTable(
+  tableElement: any,
+  // biome-ignore lint/suspicious/noExplicitAny: Style map structure
+  styleMap: Map<string, any>,
+): {
+  tableRows: any[];
+  tableColumns: any[];
+  tableProperties?: any;
+} | null {
+  try {
+    // Parse table properties
+    const tblPr = tableElement["w:tblPr"];
+    // biome-ignore lint/suspicious/noExplicitAny: Table properties structure
+    const tableProperties: any = {};
+
+    // Parse table borders
+    if (tblPr?.["w:tblBorders"]) {
+      const borders = tblPr["w:tblBorders"];
+      tableProperties.borders = {
+        top: parseBorder(borders["w:top"]),
+        bottom: parseBorder(borders["w:bottom"]),
+        left: parseBorder(borders["w:left"]),
+        right: parseBorder(borders["w:right"]),
+        insideH: parseBorder(borders["w:insideH"]),
+        insideV: parseBorder(borders["w:insideV"]),
+      };
+    }
+
+    // Parse table alignment
+    if (tblPr?.["w:jc"]?.["@_w:val"]) {
+      const jc = tblPr["w:jc"]["@_w:val"];
+      const alignMap: Record<string, number> = { left: 0, center: 1, right: 2 };
+      tableProperties.align = alignMap[jc] ?? 0;
+    }
+
+    // Parse table grid (column widths)
+    // biome-ignore lint/suspicious/noExplicitAny: Table column structure
+    const tableColumns: any[] = [];
+    if (tableElement["w:tblGrid"]?.["w:gridCol"]) {
+      const gridCols = Array.isArray(tableElement["w:tblGrid"]["w:gridCol"])
+        ? tableElement["w:tblGrid"]["w:gridCol"]
+        : [tableElement["w:tblGrid"]["w:gridCol"]];
+
+      // biome-ignore lint/suspicious/noExplicitAny: Grid column structure
+      gridCols.forEach((col: any) => {
+        const widthTwips = parseInt(col["@_w:w"] || "0");
+        tableColumns.push({
+          size: widthTwips / 20, // Convert twips to points
+        });
+      });
+    }
+
+    // Get all rows
+    const rows = tableElement["w:tr"]
+      ? Array.isArray(tableElement["w:tr"])
+        ? tableElement["w:tr"]
+        : [tableElement["w:tr"]]
+      : [];
+
+    if (rows.length === 0) return null;
+
+    // biome-ignore lint/suspicious/noExplicitAny: Table rows structure
+    const tableRows: any[] = [];
+
+    // Process each row
+    // biome-ignore lint/suspicious/noExplicitAny: Row element structure
+    rows.forEach((row: any) => {
+      const trPr = row["w:trPr"];
+      let rowHeight = 20;
+      if (trPr?.["w:trHeight"]?.["@_w:val"]) {
+        rowHeight = parseInt(trPr["w:trHeight"]["@_w:val"]) / 20;
+      }
+
+      const cellElements = row["w:tc"]
+        ? Array.isArray(row["w:tc"])
+          ? row["w:tc"]
+          : [row["w:tc"]]
+        : [];
+
+      // biome-ignore lint/suspicious/noExplicitAny: Cell array
+      const cells: any[] = [];
+
+      // biome-ignore lint/suspicious/noExplicitAny: Cell element structure
+      cellElements.forEach((cellElement: any) => {
+        const tcPr = cellElement["w:tcPr"];
+
+        // biome-ignore lint/suspicious/noExplicitAny: Cell metadata
+        const cell: any = {};
+
+        // Cell width
+        if (tcPr?.["w:tcW"]?.["@_w:w"]) {
+          cell.width = parseInt(tcPr["w:tcW"]["@_w:w"]) / 20;
+        }
+
+        // Column span
+        if (tcPr?.["w:gridSpan"]?.["@_w:val"]) {
+          cell.colSpan = parseInt(tcPr["w:gridSpan"]["@_w:val"]);
+        }
+
+        // Row span
+      if (tcPr?.["w:vMerge"]) {
+  const vMergeVal = tcPr["w:vMerge"]["@_w:val"];
+  if (vMergeVal === 'restart') {
+    cell.rowSpan = 1; // you may expand later
+  } else {
+    return; // ❗ DO NOT push this cell
+  }
+}
+
+
+        // Vertical alignment
+        if (tcPr?.["w:vAlign"]?.["@_w:val"]) {
+          const vAlign = tcPr["w:vAlign"]["@_w:val"];
+          const vAlignMap: Record<string, number> = { top: 0, center: 1, bottom: 2 };
+          cell.verticalAlign = vAlignMap[vAlign] ?? 0;
+        }
+
+        // Background color
+        if (tcPr?.["w:shd"]?.["@_w:fill"]) {
+          const fill = tcPr["w:shd"]["@_w:fill"];
+          if (fill !== "auto" && fill !== "FFFFFF") {
+            cell.background = { rgb: `#${fill}` };
+          }
+        }
+
+        // Parse cell content into cell-level body
+        const cellBody = parseCellBody(cellElement, styleMap);
+        if (cellBody) {
+          cell.body = cellBody;
+        }
+
+        cells.push(cell);
+      });
+
+      tableRows.push({ height: rowHeight, cells });
+    });
+
+    // If no columns were defined, create them from cell count
+    if (tableColumns.length === 0 && tableRows.length > 0 && tableRows[0].cells) {
+      const numCols = tableRows[0].cells.length;
+      for (let i = 0; i < numCols; i++) {
+        tableColumns.push({ size: 100 });
+      }
+    }
+
+    return {
+      tableRows,
+      tableColumns,
+      tableProperties: Object.keys(tableProperties).length > 0 ? tableProperties : undefined,
+    };
+  } catch (error) {
+    console.error("Error parsing table:", error);
+    return null;
+  }
+}
+
+/**
+ * Parse cell body content into Univer cell body format
+ */
+// biome-ignore lint/suspicious/noExplicitAny: Cell element structure
+function parseCellBody(
+  cellElement: any,
+  // biome-ignore lint/suspicious/noExplicitAny: Style map structure
+  styleMap: Map<string, any>,
+): { dataStream: string; paragraphs: any[]; textRuns: any[] } | null {
+  try {
+    let cellDataStream = "";
+    // biome-ignore lint/suspicious/noExplicitAny: Paragraph structure
+    const cellParagraphs: any[] = [];
+    // biome-ignore lint/suspicious/noExplicitAny: Text run structure
+    const cellTextRuns: any[] = [];
+
+    // Get paragraphs within the cell
+    const paragraphs = cellElement["w:p"]
+      ? Array.isArray(cellElement["w:p"])
+        ? cellElement["w:p"]
+        : [cellElement["w:p"]]
+      : [];
+
+    if (paragraphs.length === 0) {
+      // Empty cell - add placeholder
+      cellDataStream = " \r";
+      cellParagraphs.push({ startIndex: 0, paragraphStyle: {} });
+      cellTextRuns.push({ st: 0, ed: 1, ts: {} });
+      return { dataStream: cellDataStream, paragraphs: cellParagraphs, textRuns: cellTextRuns };
+    }
+
+    // biome-ignore lint/suspicious/noExplicitAny: Paragraph structure
+    paragraphs.forEach((p: any, pIndex: number) => {
+      const pPr = p["w:pPr"];
+      let hasContent = false;
+
+      // Parse paragraph alignment
+      let textAlignment: number | undefined;
+      if (pPr?.["w:jc"]?.["@_w:val"]) {
+        const jc = pPr["w:jc"]["@_w:val"];
+        const alignMap: Record<string, number | undefined> = {
+          left: undefined,
+          start: undefined,
+          center: 2,
+          right: 3,
+          end: 3,
+          both: 4,
+          justify: 4,
+          distribute: 4,
+        };
+        textAlignment = alignMap[jc];
+      }
+
+      // Get runs within the paragraph
+      const runs = p["w:r"]
+        ? Array.isArray(p["w:r"])
+          ? p["w:r"]
+          : [p["w:r"]]
+        : [];
+
+      // Process runs
+      // biome-ignore lint/suspicious/noExplicitAny: Run structure
+      runs.forEach((run: any) => {
+        // biome-ignore lint/suspicious/noExplicitAny: Text style structure
+        const ts: any = {};
+        const rPr = run["w:rPr"];
+
+        if (rPr) {
+          if ("w:b" in rPr) {
+            const bVal = rPr["w:b"];
+            if (
+              typeof bVal === "string" ||
+              !bVal["@_w:val"] ||
+              bVal["@_w:val"] !== "0"
+            ) {
+              ts.bl = 1;
+            }
+          }
+
+          if ("w:i" in rPr) {
+            const iVal = rPr["w:i"];
+            if (
+              typeof iVal === "string" ||
+              !iVal["@_w:val"] ||
+              iVal["@_w:val"] !== "0"
+            ) {
+              ts.it = 1;
+            }
+          }
+
+          if (rPr["w:u"]) ts.ul = { s: 1 };
+          if (rPr["w:strike"]) ts.st = 1;
+          if (rPr["w:sz"]?.["@_w:val"]) {
+            ts.fs = parseInt(rPr["w:sz"]["@_w:val"]) / 2;
+          }
+          if (rPr["w:rFonts"]) {
+            const fonts = rPr["w:rFonts"];
+            ts.ff =
+              fonts["@_w:ascii"] ||
+              fonts["@_w:hAnsi"] ||
+              fonts["@_w:eastAsia"] ||
+              fonts["@_w:cs"];
+          }
+          if (rPr["w:color"]?.["@_w:val"]) {
+            const colorVal = rPr["w:color"]["@_w:val"];
+            if (colorVal !== "auto" && colorVal !== "000000") {
+              ts.cl = { rgb: `#${colorVal}` };
+            }
+          }
+          if (rPr["w:shd"]?.["@_w:fill"]) {
+            const fillVal = rPr["w:shd"]["@_w:fill"];
+            if (fillVal !== "auto" && fillVal !== "FFFFFF") {
+              ts.bg = { rgb: `#${fillVal}` };
+            }
+          }
+        }
+
+        if (run["w:t"]) {
+          const text =
+            typeof run["w:t"] === "object"
+              ? run["w:t"]["#text"] || ""
+              : run["w:t"];
+
+          if (text) {
+            hasContent = true;
+            const st = cellDataStream.length;
+            cellDataStream += text;
+            cellTextRuns.push({ st, ed: cellDataStream.length, ts });
+          }
+        }
+      });
+
+      // If paragraph is empty, add space placeholder
+      if (!hasContent) {
+        const st = cellDataStream.length;
+        cellDataStream += " ";
+        cellTextRuns.push({ st, ed: cellDataStream.length, ts: {} });
+      }
+
+      // Add paragraph terminator
+      cellDataStream += "\r";
+
+      const paragraphStartIndex = cellDataStream.length - 1;
+
+      // Create paragraph definition
+      // biome-ignore lint/suspicious/noExplicitAny: Paragraph structure
+      const paragraph: any = {
+        startIndex: paragraphStartIndex,
+        paragraphStyle: {
+          spaceAbove: { v: 0 },
+          spaceBelow: { v: 0 },
+          lineSpacing: 1.0,
+        },
+      };
+
+      if (textAlignment !== undefined) {
+        paragraph.paragraphStyle.horizontalAlign = textAlignment;
+      }
+
+      cellParagraphs.push(paragraph);
+    });
+
+    return {
+      dataStream: cellDataStream,
+      paragraphs: cellParagraphs,
+      textRuns: cellTextRuns,
+    };
+  } catch (error) {
+    console.error("Error parsing cell body:", error);
+    return null;
+  }
+}
+
+/**
+ * Extract text content from a table cell (legacy - used for logging)
+ */
+// biome-ignore lint/suspicious/noExplicitAny: Cell element structure
+function extractCellText(cell: any): string {
+  let text = "";
+
+  // Get paragraphs within the cell
+  const paragraphs = cell["w:p"]
+    ? Array.isArray(cell["w:p"])
+      ? cell["w:p"]
+      : [cell["w:p"]]
+    : [];
+
+  // biome-ignore lint/suspicious/noExplicitAny: Paragraph structure
+  paragraphs.forEach((p: any, pIndex: number) => {
+    // Add newline between paragraphs within the same cell
+    if (pIndex > 0) text += "\n";
+
+    // Get runs within the paragraph
+    const runs = p["w:r"]
+      ? Array.isArray(p["w:r"])
+        ? p["w:r"]
+        : [p["w:r"]]
+      : [];
+
+    // biome-ignore lint/suspicious/noExplicitAny: Run structure
+    runs.forEach((run: any) => {
+      if (run["w:t"]) {
+        const runText =
+          typeof run["w:t"] === "object"
+            ? run["w:t"]["#text"] || ""
+            : run["w:t"];
+        text += runText;
+      }
+    });
+  });
+
+  return text;
+}
+
+/**
+ * Parse a border element from OOXML
+ */
+// biome-ignore lint/suspicious/noExplicitAny: Border element structure
+function parseBorder(borderElement: any): { w: number; cl: { rgb: string } } | null {
+  if (!borderElement) return null;
+
+  const sz = parseInt(borderElement["@_w:sz"] || "4");
+  const color = borderElement["@_w:color"] || "000000";
+
+  return {
+    w: sz / 8, // Convert eighths of a point to points
+    cl: { rgb: `#${color === "auto" ? "000000" : color}` },
+  };
 }

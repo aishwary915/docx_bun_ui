@@ -6,26 +6,26 @@
  */
 
 import type { DocumentDataModel, IDisposable, Nullable } from "@univerjs/core";
-import type { Observable } from "rxjs";
 import {
+  CommandType,
   Disposable,
   ICommandService,
   Inject,
-  IUniverInstanceService,
-  UniverInstanceType,
-  Plugin,
   Injector,
-  CommandType,
+  IUniverInstanceService,
+  Plugin,
   RANGE_DIRECTION,
+  UniverInstanceType,
 } from "@univerjs/core";
 import { DocSelectionManagerService } from "@univerjs/docs";
 import {
+  CutContentCommand,
   DocCanvasPopManagerService,
   DocEventManagerService,
-  CutContentCommand,
   type IInnerCutCommandParams,
 } from "@univerjs/docs-ui";
 import { IRenderManagerService } from "@univerjs/engine-render";
+import type { Observable } from "rxjs";
 import { BehaviorSubject, distinctUntilChanged, map } from "rxjs";
 
 // ============================================================================
@@ -223,13 +223,17 @@ export class CustomQuickInsertService extends Disposable {
       const p = paragraphs[i];
       const nextP = paragraphs[i + 1];
       const pStart = p.startIndex;
+      // For the last paragraph, accept any index >= pStart (including end of file)
       const pEnd = nextP ? nextP.startIndex : Number.MAX_SAFE_INTEGER;
 
       console.log(
         `[CustomQuickInsertService] Checking paragraph ${i}: range [${pStart}-${pEnd}), index=${index}`,
       );
 
-      if (index >= pStart && index < pEnd) {
+      // Use <= for the last paragraph to include positions at or after paragraph start
+      const isInRange = nextP ? (index >= pStart && index < pEnd) : (index >= pStart);
+      
+      if (isInRange) {
         paragraph = p;
         console.log(
           `[CustomQuickInsertService] ✓ Found matching paragraph ${i}`,
@@ -678,9 +682,8 @@ export class CustomQuickInsertPlugin extends Plugin {
           await this._insertParagraph();
           break;
         case "table":
-          console.log(
-            "[CustomQuickInsertPlugin] Table insertion requested (not implemented)",
-          );
+          console.log("[CustomQuickInsertPlugin] Inserting Table");
+          await this._insertTable();
           break;
         default:
           console.warn(
@@ -780,6 +783,74 @@ export class CustomQuickInsertPlugin extends Plugin {
     }
   }
 
+  private async _insertTable(): Promise<void> {
+    console.log("[CustomQuickInsertPlugin] _insertTable() called");
+    
+    // Table insertion is not supported in Univer preset-docs-core v0.15.x
+    // The table functionality exists for importing from DOCX, but programmatic 
+    // insertion through slash commands requires @univerjs/docs-table plugin
+    // which is not available in this version.
+    
+    // Instead, insert a placeholder text that indicates where a table should be
+    const commandService = this._injector.get(ICommandService);
+    const selectionManager = this._injector.get(DocSelectionManagerService);
+    const univerInstanceService = this._injector.get(IUniverInstanceService);
+
+    const currentDoc =
+      univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(
+        UniverInstanceType.UNIVER_DOC,
+      );
+
+    if (!currentDoc) {
+      console.error(
+        "[CustomQuickInsertPlugin] No current document in _insertTable",
+      );
+      return;
+    }
+
+    const selection = selectionManager.getActiveTextRange();
+    if (!selection) {
+      console.error("[CustomQuickInsertPlugin] No selection in _insertTable");
+      return;
+    }
+
+    console.log(
+      "[CustomQuickInsertPlugin] ⚠️ Table insertion via slash command not supported in this Univer version",
+    );
+    console.log(
+      "[CustomQuickInsertPlugin] Inserting placeholder text instead. Tables can be imported from DOCX files.",
+    );
+    
+    // Insert a placeholder that user can replace
+    const placeholderText = "[Table - Import from DOCX or use external editor]\n";
+    
+    try {
+      const result = await commandService.executeCommand(
+        "doc.command.insert-text",
+        {
+          unitId: currentDoc.getUnitId(),
+          body: {
+            dataStream: placeholderText,
+          },
+          range: {
+            startOffset: selection.startOffset,
+            endOffset: selection.startOffset,
+            collapsed: true,
+          },
+          segmentId: "",
+        },
+      );
+
+      if (result) {
+        console.log("[CustomQuickInsertPlugin] ✅ Placeholder inserted successfully");
+      } else {
+        console.error("[CustomQuickInsertPlugin] ❌ Failed to insert placeholder");
+      }
+    } catch (error) {
+      console.error("[CustomQuickInsertPlugin] ❌ Error inserting placeholder:", error);
+    }
+  }
+
   private async _insertParagraph(): Promise<void> {
     console.log("[CustomQuickInsertPlugin] _insertParagraph() called");
 
@@ -873,6 +944,70 @@ export class CustomQuickInsertPlugin extends Plugin {
     let isMenuOpen = false;
     let lastSlashPos = -1;
     let debounceTimeout: number | null = null;
+    let justOpened = false; // Flag to prevent immediate closure
+
+    // Listen for keyboard events directly to catch "/" key press
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Check if "/" key is pressed (without modifiers)
+      if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        console.log("[CustomQuickInsertPlugin] Slash key detected via keyboard event");
+        
+        // Small delay to allow the "/" to be inserted into the document
+        setTimeout(() => {
+          const currentDoc = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(
+            UniverInstanceType.UNIVER_DOC,
+          );
+          
+          if (!currentDoc) {
+            console.warn("[CustomQuickInsertPlugin] No current document");
+            return;
+          }
+
+          const selection = selectionManager.getActiveTextRange();
+          if (!selection) {
+            console.warn("[CustomQuickInsertPlugin] No active selection");
+            return;
+          }
+
+          const slashPosition = selection.startOffset;
+          console.log("[CustomQuickInsertPlugin] Slash position:", slashPosition);
+
+          // Check if the character before cursor is "/"
+          const body = currentDoc.getBody();
+          const dataStream = body?.dataStream || "";
+          const charBeforeCursor = dataStream[slashPosition - 1];
+
+          if (charBeforeCursor === "/") {
+            console.log("[CustomQuickInsertPlugin] Confirmed / character at position", slashPosition - 1);
+            
+            lastSlashPos = slashPosition - 1;
+            isMenuOpen = true;
+            justOpened = true; // Set flag to prevent immediate closure
+
+            // Set input offset to track the slash position
+            service.setInputOffset({
+              start: lastSlashPos,
+              end: slashPosition,
+            });
+
+            // Show the popup menu
+            service.showPopup({
+              index: slashPosition,
+              unitId: currentDoc.getUnitId(),
+            });
+
+            // Clear the justOpened flag after a short delay (match menu's click-outside delay)
+            setTimeout(() => {
+              justOpened = false;
+            }, 300);
+          }
+        }, 50);
+      }
+    };
+
+    // Attach keyboard event listener to the document
+    document.addEventListener("keydown", handleKeyDown, true);
+    console.log("[CustomQuickInsertPlugin] Keyboard event listener attached");
 
     // Subscribe to ALL command executions to detect text changes
     const disposable = commandService.onCommandExecuted((command) => {
@@ -980,8 +1115,8 @@ export class CustomQuickInsertPlugin extends Plugin {
                 end: cursorPos,
               });
             }
-          } else if (isMenuOpen) {
-            // Close menu if "/" is gone or cursor moved away
+          } else if (isMenuOpen && !justOpened) {
+            // Close menu if "/" is gone or cursor moved away (but not if just opened)
             const editPopup = service.editPopup;
             if (editPopup) {
               const startPos = editPopup.anchor;
@@ -1008,7 +1143,16 @@ export class CustomQuickInsertPlugin extends Plugin {
       }, 100); // 100ms debounce delay
     });
 
-    this.disposeWithMe(disposable);
+    // Cleanup function
+    const cleanup = () => {
+      document.removeEventListener("keydown", handleKeyDown, true);
+      disposable.dispose();
+    };
+
+    this.disposeWithMe({
+      dispose: cleanup,
+    });
+    
     console.log("[CustomQuickInsertPlugin] Slash command listener active");
   }
 }

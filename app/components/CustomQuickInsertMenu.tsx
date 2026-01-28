@@ -4,11 +4,11 @@
  * React component that renders the slash command menu with AI button
  */
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   CustomQuickInsertService,
-  type QuickInsertMenu,
   type IQuickInsertMenuItem,
+  type QuickInsertMenu,
 } from "../plugins/CustomQuickInsertPlugin";
 
 interface CustomQuickInsertMenuProps {
@@ -147,11 +147,11 @@ export function CustomQuickInsertMenu({
       }
     };
 
-    // Increased delay to prevent immediate closing
+    // Increased delay to prevent immediate closing - longer delay for end-of-file cases
     const timeoutId = setTimeout(() => {
       document.addEventListener("mousedown", handleClickOutside);
       console.log("[CustomQuickInsertMenu] Click-outside handler attached");
-    }, 200);
+    }, 300);
 
     return () => {
       clearTimeout(timeoutId);
