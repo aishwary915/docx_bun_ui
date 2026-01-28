@@ -946,38 +946,18 @@ export class CustomQuickInsertPlugin extends Plugin {
     let debounceTimeout: number | null = null;
     let justOpened = false; // Flag to prevent immediate closure
 
-    // Helper function to check if a character is a valid "start of line" character
-    // This includes whitespace, newlines, and Univer's special control characters
-    const isLineStartChar = (char: string | undefined): boolean => {
-      if (char === undefined) return true; // Start of document
-
-      // Standard whitespace and newlines
-      if (char === '\n' || char === '\r' || char === ' ' || char === '\t') return true;
-
-      // Univer special characters:
-      // \u0000 - null/start marker
-      // \b (\u0008) - embedded object/drawing placeholder
-      // \u0014 - section break
-      // \u001e - custom block marker
-      // \u001f - table cell marker
-      const charCode = char.charCodeAt(0);
-      if (charCode < 32) return true; // Any control character
-
-      return false;
-    };
-
     // Listen for keyboard events directly to catch "/" key press
     const handleKeyDown = (e: KeyboardEvent) => {
       // Check if "/" key is pressed (without modifiers)
       if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         console.log("[CustomQuickInsertPlugin] Slash key detected via keyboard event");
-
+        
         // Small delay to allow the "/" to be inserted into the document
         setTimeout(() => {
           const currentDoc = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(
             UniverInstanceType.UNIVER_DOC,
           );
-
+          
           if (!currentDoc) {
             console.warn("[CustomQuickInsertPlugin] No current document");
             return;
@@ -998,36 +978,28 @@ export class CustomQuickInsertPlugin extends Plugin {
           const charBeforeCursor = dataStream[slashPosition - 1];
 
           if (charBeforeCursor === "/") {
-            // Check if the slash is at a valid position (start of line/paragraph)
-            const charBeforeSlash = slashPosition > 1 ? dataStream[slashPosition - 2] : undefined;
-            const isValidPosition = isLineStartChar(charBeforeSlash);
+            console.log("[CustomQuickInsertPlugin] Confirmed / character at position", slashPosition - 1);
+            
+            lastSlashPos = slashPosition - 1;
+            isMenuOpen = true;
+            justOpened = true; // Set flag to prevent immediate closure
 
-            console.log("[CustomQuickInsertPlugin] Confirmed / at position", slashPosition - 1,
-              "charBefore:", charBeforeSlash ? `'${charBeforeSlash}' (${charBeforeSlash.charCodeAt(0)})` : "undefined",
-              "isValidPosition:", isValidPosition);
+            // Set input offset to track the slash position
+            service.setInputOffset({
+              start: lastSlashPos,
+              end: slashPosition,
+            });
 
-            if (isValidPosition) {
-              lastSlashPos = slashPosition - 1;
-              isMenuOpen = true;
-              justOpened = true; // Set flag to prevent immediate closure
+            // Show the popup menu
+            service.showPopup({
+              index: slashPosition,
+              unitId: currentDoc.getUnitId(),
+            });
 
-              // Set input offset to track the slash position
-              service.setInputOffset({
-                start: lastSlashPos,
-                end: slashPosition,
-              });
-
-              // Show the popup menu
-              service.showPopup({
-                index: slashPosition,
-                unitId: currentDoc.getUnitId(),
-              });
-
-              // Clear the justOpened flag after a short delay (match menu's click-outside delay)
-              setTimeout(() => {
-                justOpened = false;
-              }, 300);
-            }
+            // Clear the justOpened flag after a short delay (match menu's click-outside delay)
+            setTimeout(() => {
+              justOpened = false;
+            }, 300);
           }
         }, 50);
       }
@@ -1092,11 +1064,11 @@ export class CustomQuickInsertPlugin extends Plugin {
               slashPos = lookBackStart + lastSlashIndex;
               const afterSlash = textBefore.substring(lastSlashIndex + 1);
 
-              // Check if this is at the start of a paragraph or after whitespace/control char
-              const charBeforeSlash = lookBackStart + lastSlashIndex > 0
-                ? dataStream[lookBackStart + lastSlashIndex - 1]
-                : undefined;
-              const isValidPosition = isLineStartChar(charBeforeSlash);
+              // Check if this is at the start of a paragraph or after whitespace
+              const charBeforeSlash = lookBackStart + lastSlashIndex > 0 
+                ? dataStream[lookBackStart + lastSlashIndex - 1] 
+                : '\n';
+              const isAfterWhitespace = charBeforeSlash === '\n' || charBeforeSlash === '\r' || charBeforeSlash === ' ';
 
               // Allow "/" if followed by alphanumeric characters only
               const isValidFilter = /^[a-zA-Z0-9]*$/.test(afterSlash);
@@ -1106,7 +1078,7 @@ export class CustomQuickInsertPlugin extends Plugin {
                   !afterSlash.includes("\n") &&
                   !afterSlash.includes("\t"));
 
-              if (isValidFilter && isNotOldSlash && isValidPosition) {
+              if (isValidFilter && isNotOldSlash && isAfterWhitespace) {
                 shouldShowMenu = true;
                 console.log(
                   "[CustomQuickInsertPlugin] ✅ Valid slash detected at position",
