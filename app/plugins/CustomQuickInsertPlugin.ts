@@ -217,28 +217,38 @@ export class CustomQuickInsertService extends Disposable {
       return;
     }
 
-    // Find the paragraph that CONTAINS the index (not after it)
+    // Find the paragraph that CONTAINS or is CLOSEST TO the index
     let paragraph: any = null;
-    for (let i = 0; i < paragraphs.length; i++) {
-      const p = paragraphs[i];
-      const nextP = paragraphs[i + 1];
-      const pStart = p.startIndex;
-      // For the last paragraph, accept any index >= pStart (including end of file)
-      const pEnd = nextP ? nextP.startIndex : Number.MAX_SAFE_INTEGER;
-
+    
+    // Special case: if index is before first paragraph, use first paragraph
+    if (paragraphs.length > 0 && index < paragraphs[0].startIndex) {
+      paragraph = paragraphs[0];
       console.log(
-        `[CustomQuickInsertService] Checking paragraph ${i}: range [${pStart}-${pEnd}), index=${index}`,
+        `[CustomQuickInsertService] ✓ Index ${index} is before first paragraph (${paragraphs[0].startIndex}), using first paragraph`,
       );
+    } else {
+      // Find the paragraph that contains the index
+      for (let i = 0; i < paragraphs.length; i++) {
+        const p = paragraphs[i];
+        const nextP = paragraphs[i + 1];
+        const pStart = p.startIndex;
+        // For the last paragraph, accept any index >= pStart (including end of file)
+        const pEnd = nextP ? nextP.startIndex : Number.MAX_SAFE_INTEGER;
 
-      // Use <= for the last paragraph to include positions at or after paragraph start
-      const isInRange = nextP ? (index >= pStart && index < pEnd) : (index >= pStart);
-      
-      if (isInRange) {
-        paragraph = p;
         console.log(
-          `[CustomQuickInsertService] ✓ Found matching paragraph ${i}`,
+          `[CustomQuickInsertService] Checking paragraph ${i}: range [${pStart}-${pEnd}), index=${index}`,
         );
-        break;
+
+        // Use <= for the last paragraph to include positions at or after paragraph start
+        const isInRange = nextP ? (index >= pStart && index < pEnd) : (index >= pStart);
+        
+        if (isInRange) {
+          paragraph = p;
+          console.log(
+            `[CustomQuickInsertService] ✓ Found matching paragraph ${i}`,
+          );
+          break;
+        }
       }
     }
 
@@ -272,44 +282,83 @@ export class CustomQuickInsertService extends Disposable {
 
     let bounds: any = null;
 
-    // Method 1: Try findParagraphBoundByIndex with cursor position (not paragraph start)
-    let paragraphBound =
-      docEventManagerService.findParagraphBoundByIndex(index);
+    // Try to get the text range position for the current index
+    // This should give us a more accurate position than paragraph bounds
+    try {
+      const skeleton = docEventManagerService.getSkeleton?.();
+      if (skeleton) {
+        // Try to get position from skeleton
+        const position = skeleton.findPositionByIndex?.(index);
+        console.log(
+          "[CustomQuickInsertService] Skeleton position at index",
+          index,
+          ":",
+          position,
+        );
 
-    console.log(
-      "[CustomQuickInsertService] paragraphBound from cursor index:",
-      paragraphBound,
-    );
-
-    if (paragraphBound) {
-      bounds = paragraphBound.firstLine;
-    } else {
-      // Method 2: Fallback - Try with paragraph start index
-      paragraphBound = docEventManagerService.findParagraphBoundByIndex(
-        paragraph.startIndex,
+        if (position && position.position) {
+          const pos = position.position;
+          bounds = {
+            left: pos.startX || pos.x || 0,
+            top: pos.startY || pos.y || 0,
+            bottom: (pos.endY || pos.y || 0) + (pos.height || 20),
+            right: (pos.endX || pos.x || 0) + 10,
+          };
+          console.log(
+            "[CustomQuickInsertService] ✓ Using skeleton position:",
+            bounds,
+          );
+        }
+      }
+    } catch (error) {
+      console.log(
+        "[CustomQuickInsertService] Could not get skeleton position:",
+        error,
       );
+    }
+
+    // Fallback: Use paragraph bounds and estimate offset based on character distance
+    if (!bounds) {
+      let paragraphBound =
+        docEventManagerService.findParagraphBoundByIndex(index);
 
       console.log(
-        "[CustomQuickInsertService] paragraphBound from paragraph start:",
+        "[CustomQuickInsertService] paragraphBound from cursor index:",
         paragraphBound,
       );
 
-      if (paragraphBound) {
-        bounds = paragraphBound.firstLine;
-      }
-    }
+      if (!paragraphBound) {
+        // Try with paragraph start index
+        paragraphBound = docEventManagerService.findParagraphBoundByIndex(
+          paragraph.startIndex,
+        );
 
-    if (!bounds) {
-      // Method 3: Ultimate fallback - Use fixed position
-      console.log(
-        "[CustomQuickInsertService] Using fixed fallback position for menu",
-      );
-      bounds = {
-        left: 100,
-        top: 150,
-        bottom: 170,
-        right: 300,
-      };
+        console.log(
+          "[CustomQuickInsertService] paragraphBound from paragraph start:",
+          paragraphBound,
+        );
+      }
+
+      if (paragraphBound) {
+        bounds = { ...paragraphBound.firstLine };
+        
+        // Estimate horizontal offset based on character distance from paragraph start
+        // Assume average character width of ~8 pixels (will vary by font/size)
+        const charOffset = index - paragraph.startIndex;
+        const estimatedOffset = charOffset * 8;
+        
+        bounds.left = bounds.left + estimatedOffset;
+        bounds.right = bounds.left + 10;
+        
+        console.log(
+          "[CustomQuickInsertService] ✓ Using estimated position with offset:",
+          charOffset,
+          "chars =",
+          estimatedOffset,
+          "px, bounds:",
+          bounds,
+        );
+      }
     }
 
     if (!bounds) {
@@ -944,70 +993,11 @@ export class CustomQuickInsertPlugin extends Plugin {
     let isMenuOpen = false;
     let lastSlashPos = -1;
     let debounceTimeout: number | null = null;
-    let justOpened = false; // Flag to prevent immediate closure
 
-    // Listen for keyboard events directly to catch "/" key press
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Check if "/" key is pressed (without modifiers)
-      if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        console.log("[CustomQuickInsertPlugin] Slash key detected via keyboard event");
-        
-        // Small delay to allow the "/" to be inserted into the document
-        setTimeout(() => {
-          const currentDoc = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(
-            UniverInstanceType.UNIVER_DOC,
-          );
-          
-          if (!currentDoc) {
-            console.warn("[CustomQuickInsertPlugin] No current document");
-            return;
-          }
-
-          const selection = selectionManager.getActiveTextRange();
-          if (!selection) {
-            console.warn("[CustomQuickInsertPlugin] No active selection");
-            return;
-          }
-
-          const slashPosition = selection.startOffset;
-          console.log("[CustomQuickInsertPlugin] Slash position:", slashPosition);
-
-          // Check if the character before cursor is "/"
-          const body = currentDoc.getBody();
-          const dataStream = body?.dataStream || "";
-          const charBeforeCursor = dataStream[slashPosition - 1];
-
-          if (charBeforeCursor === "/") {
-            console.log("[CustomQuickInsertPlugin] Confirmed / character at position", slashPosition - 1);
-            
-            lastSlashPos = slashPosition - 1;
-            isMenuOpen = true;
-            justOpened = true; // Set flag to prevent immediate closure
-
-            // Set input offset to track the slash position
-            service.setInputOffset({
-              start: lastSlashPos,
-              end: slashPosition,
-            });
-
-            // Show the popup menu
-            service.showPopup({
-              index: slashPosition,
-              unitId: currentDoc.getUnitId(),
-            });
-
-            // Clear the justOpened flag after a short delay (match menu's click-outside delay)
-            setTimeout(() => {
-              justOpened = false;
-            }, 300);
-          }
-        }, 50);
-      }
-    };
-
-    // Attach keyboard event listener to the document
-    document.addEventListener("keydown", handleKeyDown, true);
-    console.log("[CustomQuickInsertPlugin] Keyboard event listener attached");
+    // NOTE: We DO NOT intercept keyboard events for "/" because it interferes with
+    // natural text input and causes "/" to be inserted in the wrong place.
+    // Instead, we rely on detecting "/" via text editing commands after Univer
+    // has properly inserted it at the cursor position.
 
     // Subscribe to ALL command executions to detect text changes
     const disposable = commandService.onCommandExecuted((command) => {
@@ -1050,35 +1040,31 @@ export class CustomQuickInsertPlugin extends Plugin {
           const dataStream = body.dataStream;
           const cursorPos = selection.startOffset;
 
-          // Check for "/" pattern
+          // Check for "/" pattern - simplified to work everywhere
           let shouldShowMenu = false;
           let slashPos = -1;
 
           if (cursorPos > 0) {
-            // Look back up to 50 characters to find the most recent "/"
-            const lookBackStart = Math.max(0, cursorPos - 50);
-            const textBefore = dataStream.substring(lookBackStart, cursorPos);
+            // Look back in the text before cursor to find the most recent "/"
+            // But only within a reasonable distance (20 chars) to avoid false triggers
+            const searchStart = Math.max(0, cursorPos - 20);
+            const textBefore = dataStream.substring(searchStart, cursorPos);
             const lastSlashIndex = textBefore.lastIndexOf("/");
 
             if (lastSlashIndex !== -1) {
-              slashPos = lookBackStart + lastSlashIndex;
-              const afterSlash = textBefore.substring(lastSlashIndex + 1);
+              slashPos = searchStart + lastSlashIndex;
+              const afterSlash = dataStream.substring(slashPos + 1, cursorPos);
 
-              // Check if this is at the start of a paragraph or after whitespace
-              const charBeforeSlash = lookBackStart + lastSlashIndex > 0 
-                ? dataStream[lookBackStart + lastSlashIndex - 1] 
-                : '\n';
-              const isAfterWhitespace = charBeforeSlash === '\n' || charBeforeSlash === '\r' || charBeforeSlash === ' ';
-
-              // Allow "/" if followed by alphanumeric characters only
+              // Allow "/" anywhere - just check that text after slash is on same line
+              // and consists of valid filter characters (letters, numbers, or empty)
               const isValidFilter = /^[a-zA-Z0-9]*$/.test(afterSlash);
-              const isNotOldSlash =
-                afterSlash.length === 0 ||
-                (!afterSlash.includes("\r") &&
-                  !afterSlash.includes("\n") &&
-                  !afterSlash.includes("\t"));
+              const isOnSameLine = !afterSlash.includes("\r") && !afterSlash.includes("\n");
+              const isReasonablyClose = afterSlash.length <= 20; // Close to slash
 
-              if (isValidFilter && isNotOldSlash && isAfterWhitespace) {
+              // Additional check: slash must be recent (within last 20 chars of cursor)
+              const slashIsRecent = (cursorPos - slashPos) <= 20;
+
+              if (isValidFilter && isOnSameLine && isReasonablyClose && slashIsRecent) {
                 shouldShowMenu = true;
                 console.log(
                   "[CustomQuickInsertPlugin] ✅ Valid slash detected at position",
@@ -1115,7 +1101,7 @@ export class CustomQuickInsertPlugin extends Plugin {
                 end: cursorPos,
               });
             }
-          } else if (isMenuOpen && !justOpened) {
+          } else if (isMenuOpen) {
             // Close menu if "/" is gone or cursor moved away (but not if just opened)
             const editPopup = service.editPopup;
             if (editPopup) {
@@ -1140,12 +1126,11 @@ export class CustomQuickInsertPlugin extends Plugin {
             error,
           );
         }
-      }, 100); // 100ms debounce delay
+      }, 50); // 50ms debounce delay for faster response
     });
 
     // Cleanup function
     const cleanup = () => {
-      document.removeEventListener("keydown", handleKeyDown, true);
       disposable.dispose();
     };
 

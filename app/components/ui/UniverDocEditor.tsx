@@ -1,8 +1,18 @@
 // Import styles for preset mode
+import { DocSelectionManagerService } from "@univerjs/docs";
+import { IRenderManagerService } from "@univerjs/engine-render";
 import "@univerjs/preset-docs-core/lib/index.css";
 import { Download, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { Button } from "~/components/ui/button";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "~/components/ui/sheet";
 import { CustomQuickInsertPlugin } from "~/plugins/CustomQuickInsertPlugin";
 import { HorizontalLineSpacingPlugin } from "~/plugins/HorizontalLineSpacingPlugin";
 import { convertDocxToUniverData } from "~/utils/docx-converter";
@@ -35,6 +45,12 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
     { x: number; y: number } | undefined
   >();
   const quickInsertServiceRef = useRef<any>(null);
+
+  // AI Assistant Sheet state
+  const [showAISheet, setShowAISheet] = useState(false);
+  const [selectedText, setSelectedText] = useState("");
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [selectionRange, setSelectionRange] = useState<{startOffset: number, endOffset: number} | null>(null);
 
   // Load initial file if provided
   useEffect(() => {
@@ -222,6 +238,9 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
                       documentData.body?.dataStream?.length || 0,
                     paragraphsCount: documentData.body?.paragraphs?.length || 0,
                     textRunsCount: documentData.body?.textRuns?.length || 0,
+                    bodyTablesCount: documentData.body?.tables?.length || 0,
+                    hasTableSource: !!documentData.tableSource,
+                    tableSourceKeys: documentData.tableSource ? Object.keys(documentData.tableSource) : [],
                     dataStreamPreview:
                       documentData.body?.dataStream?.substring(0, 100) ||
                       "empty",
@@ -232,6 +251,39 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
                   2,
                 ),
               );
+
+              // Debug: Log table control characters in dataStream
+              if (documentData.body?.tables?.length > 0) {
+                const ds = documentData.body.dataStream;
+                console.log("🔍 Table control characters in dataStream:");
+                for (let i = 0; i < ds.length; i++) {
+                  const code = ds.charCodeAt(i);
+                  if (code >= 0x0E && code <= 0x1F) {
+                    console.log(`   Position ${i}: char code ${code} (0x${code.toString(16)})`);
+                  }
+                }
+                console.log("🔍 Body tables:", documentData.body.tables);
+                console.log("🔍 TableSource:", documentData.tableSource);
+
+                // Verify each table's startIndex points to \x1A (26) and endIndex-1 to \x0F (15)
+                documentData.body.tables.forEach((table: any, idx: number) => {
+                  const startChar = ds.charCodeAt(table.startIndex);
+                  const endChar = ds.charCodeAt(table.endIndex - 1);
+                  const isValid = startChar === 0x1A && endChar === 0x0F;
+                  console.log(`📋 Table ${idx} (${table.tableId}):`);
+                  console.log(`   startIndex=${table.startIndex}, char=0x${startChar.toString(16)} (${startChar === 0x1A ? '✅ TABLE_START' : '❌ WRONG'})`);
+                  console.log(`   endIndex=${table.endIndex}, char at endIndex-1=0x${endChar.toString(16)} (${endChar === 0x0F ? '✅ TABLE_END' : '❌ WRONG'})`);
+                  console.log(`   Valid: ${isValid ? '✅ YES' : '❌ NO'}`);
+
+                  // Check if tableSource has this table
+                  const hasTableSource = documentData.tableSource && documentData.tableSource[table.tableId];
+                  console.log(`   TableSource entry exists: ${hasTableSource ? '✅ YES' : '❌ NO'}`);
+                  if (hasTableSource) {
+                    const ts = documentData.tableSource[table.tableId];
+                    console.log(`   TableSource details: ${ts.tableRows?.length} rows, ${ts.tableColumns?.length} columns`);
+                  }
+                });
+              }
 
               // Ensure the document data has valid content
               if (
@@ -257,7 +309,133 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
                   },
                 });
               } else {
-                univerAPI.createUniverDoc(documentData);
+                // CRITICAL: Pass complete document data including tableSource
+                const { body, documentStyle, tableSource, lists } = documentData;
+
+                // Build the document payload matching IDocumentData structure
+                const docPayload: any = {
+                  body: {
+                    dataStream: body.dataStream || "\r\n",
+                    textRuns: body.textRuns || [],
+                    paragraphs: body.paragraphs || [],
+                    sectionBreaks: body.sectionBreaks || [{ startIndex: (body.dataStream?.length || 1) - 1 }],
+                    tables: body.tables || [],
+                    customBlocks: body.customBlocks || [],
+                    customRanges: body.customRanges || [],
+                  },
+                  documentStyle: documentStyle || {
+                    pageSize: { width: 595.27, height: 841.89 },
+                    documentFlavor: 1,
+                    marginTop: 72,
+                    marginBottom: 72,
+                    marginLeft: 72,
+                    marginRight: 72,
+                    renderConfig: {
+                      zeroWidthParagraphBreak: 0,
+                      vertexAngle: 0,
+                      centerAngle: 0,
+                      background: { rgb: "#ffffff" },
+                    },
+                  },
+                  // CRITICAL: tableSource must be top-level (from IReferenceSource interface)
+                  tableSource: tableSource || {},
+                };
+
+                // Include lists if present
+                if (lists && Object.keys(lists).length > 0) {
+                  docPayload.lists = lists;
+                }
+
+                console.log("📋 Creating doc with tableSource keys:", Object.keys(docPayload.tableSource || {}));
+                const doc = univerAPI.createUniverDoc(docPayload);
+
+                // CRITICAL WORKAROUND: Univer's _buildTableCache() is called during createUniverDoc()
+                // when getSnapshot().tableSource might still be null due to timing issues.
+                // We need to patch the data model and trigger a view model reset.
+                if (tableSource && Object.keys(tableSource).length > 0 && body.tables?.length > 0) {
+                  setTimeout(async () => {
+                    try {
+                      const activeDoc = univerAPI.getActiveDocument();
+                      if (activeDoc && activeDoc.getId() === doc.getId()) {
+                        // Access internal document data model
+                        const docAny = activeDoc as unknown as {
+                          _injector?: { get: (token: unknown) => unknown };
+                          _documentDataModel?: {
+                            getUnitId: () => string;
+                            getSnapshot: () => { tableSource?: Record<string, unknown>; body?: { tables?: unknown[] } };
+                          };
+                        };
+
+                        if (docAny._injector && docAny._documentDataModel) {
+                          const dataModel = docAny._documentDataModel;
+                          const modelSnapshot = dataModel.getSnapshot();
+
+                          // Patch tableSource onto the data model's snapshot
+                          if (!modelSnapshot.tableSource) {
+                            (modelSnapshot as Record<string, unknown>).tableSource = tableSource;
+                            console.log("🔧 Patched tableSource onto data model snapshot");
+                          }
+                          if (modelSnapshot?.body && !Array.isArray(modelSnapshot.body.tables)) {
+                            (modelSnapshot.body as Record<string, unknown>).tables = body.tables;
+                            console.log("🔧 Patched body.tables onto data model snapshot");
+                          }
+
+                          if (modelSnapshot?.tableSource) {
+                            const injector = docAny._injector;
+                            const unitId = dataModel.getUnitId();
+
+                            // Get render manager and trigger view model reset
+                            const renderManager = injector.get(IRenderManagerService) as {
+                              getRenderById: (id: string) => {
+                                with: (tok: unknown) => {
+                                  get: (tok: unknown) => unknown;
+                                };
+                              } | null;
+                            };
+
+                            if (renderManager) {
+                              const renderUnit = renderManager.getRenderById(unitId);
+                              if (renderUnit) {
+                                // Get the view model token
+                                const DocViewModelManagerServiceToken = Symbol.for("DocViewModelManagerService");
+                                const viewModelManager = renderUnit.with(DocViewModelManagerServiceToken).get(DocViewModelManagerServiceToken) as {
+                                  getViewModel: () => {
+                                    reset: () => void;
+                                  } | null;
+                                } | null;
+
+                                if (viewModelManager) {
+                                  const viewModel = viewModelManager.getViewModel();
+                                  if (viewModel && typeof viewModel.reset === "function") {
+                                    console.log("🔄 Triggering view model reset to rebuild table cache...");
+                                    viewModel.reset();
+
+                                    // Also trigger skeleton calculation
+                                    const DocSkeletonManagerServiceToken = Symbol.for("DocSkeletonManagerService");
+                                    const skeletonManager = renderUnit.with(DocSkeletonManagerServiceToken).get(DocSkeletonManagerServiceToken) as {
+                                      getCurrent: () => { calculate: () => void } | null;
+                                    } | null;
+
+                                    if (skeletonManager) {
+                                      const skeleton = skeletonManager.getCurrent();
+                                      if (skeleton && typeof skeleton.calculate === "function") {
+                                        console.log("🔄 Triggering skeleton recalculation...");
+                                        skeleton.calculate();
+                                      }
+                                    }
+                                    console.log("✅ Table cache rebuild triggered");
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    } catch (e) {
+                      console.warn("⚠️ Could not trigger view model reset for table cache:", e);
+                    }
+                  }, 50);
+                }
               }
             } else {
               console.log("📄 Creating blank document");
@@ -269,6 +447,7 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
               if (activeDoc) {
                 console.log("✓ Document created:", activeDoc.getId());
                 const snapshot = activeDoc.getSnapshot();
+                const snapshotAny = snapshot as any;
                 console.log(
                   "📋 Document snapshot:",
                   JSON.stringify(
@@ -276,17 +455,22 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
                       hasBody: !!snapshot?.body,
                       dataStreamLength: snapshot?.body?.dataStream?.length || 0,
                       paragraphsCount: snapshot?.body?.paragraphs?.length || 0,
-                      dataStreamContent:
-                        snapshot?.body?.dataStream?.substring(0, 200) ||
-                        "empty",
-                      firstParagraph: snapshot?.body?.paragraphs?.[0] || null,
+                      bodyTablesCount: snapshot?.body?.tables?.length || 0,
+                      hasTableSource: !!snapshotAny?.tableSource,
+                      tableSourceKeys: snapshotAny?.tableSource ? Object.keys(snapshotAny.tableSource) : [],
                     },
                     null,
                     2,
                   ),
                 );
+                // Log tableSource details if present
+                if (snapshotAny?.tableSource && Object.keys(snapshotAny.tableSource).length > 0) {
+                  console.log("✅ Snapshot has tableSource:", snapshotAny.tableSource);
+                } else {
+                  console.log("❌ Snapshot tableSource is EMPTY - tables won't render!");
+                }
               }
-            }, 100);
+            }, 200);
 
             setLoading(false);
             setImporting(false);
@@ -422,6 +606,18 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
 
     initUniver();
 
+    // Listen for AI action events
+    const handleAIAction = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      console.log("[AI Event] Received:", customEvent.detail);
+      if (customEvent.detail?.selectedText) {
+        setSelectedText(customEvent.detail.selectedText);
+        setSelectionRange(customEvent.detail.selectionRange || null);
+        setShowAISheet(true);
+      }
+    };
+    window.addEventListener("univer:ai-action", handleAIAction);
+
     return () => {
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
@@ -438,6 +634,7 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
       // Cleanup event listeners
       window.removeEventListener("univer:quick-insert-show", () => { });
       window.removeEventListener("univer:quick-insert-close", () => { });
+      window.removeEventListener("univer:ai-action", () => { });
     };
   }, [documentData]);
 
@@ -638,26 +835,126 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
         />
       )}
 
-      {/* Action buttons */}
+      {/* Action buttons - Improved UI */}
       {!error && !loading && (
-        <div className="absolute top-4 right-4 z-20 flex gap-3">
-          <button
-            type="button"
+        <div className="absolute top-4 right-20 z-50 flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
             onClick={triggerFileImport}
             disabled={importing}
-            className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-md transition-colors hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="border-blue-200 hover:bg-blue-50 hover:border-blue-300"
           >
-            <Upload className="h-4 w-4" />
+            <Upload className="h-4 w-4 mr-2" />
             {importing ? "Importing..." : "Import DOCX"}
-          </button>
-          <button
-            type="button"
-            onClick={handleExport}
-            className="flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-md transition-colors hover:bg-emerald-700"
+          </Button>
+          <Button
+            size="sm"
+            onClick={async () => {
+              console.log("[AI Button] Clicked - using Univer's native selection API");
+
+              try {
+                if (!univerAPIRef.current) {
+                  alert("Editor not ready. Please try again.");
+                  return;
+                }
+
+                // Get the active document from Univer API
+                const activeDoc = univerAPIRef.current.getActiveDocument();
+                if (!activeDoc) {
+                  alert("No active document found.");
+                  return;
+                }
+
+                // Get document snapshot which contains dataStream
+                const snapshot = activeDoc.getSnapshot();
+                if (!snapshot?.body?.dataStream) {
+                  alert("Document data not available.");
+                  return;
+                }
+
+                console.log("[AI Button] Document snapshot retrieved");
+
+                // Get selection from Univer - use univerAPIRef
+                if (!univerInstanceRef.current) {
+                  alert("Editor not ready.");
+                  return;
+                }
+
+                const injector = (univerInstanceRef.current as any).__getInjector?.();
+                if (!injector) {
+                  alert("Cannot access editor services.");
+                  return;
+                }
+
+                const selectionManager = injector.get(DocSelectionManagerService);
+                if (!selectionManager) {
+                  alert("Selection service not available.");
+                  return;
+                }
+
+                const selection = selectionManager.getActiveTextRange();
+                if (!selection) {
+                  alert("Please select some text in the document first.");
+                  return;
+                }
+
+                // Extract selected text from dataStream
+                const { startOffset, endOffset } = selection;
+                const dataStream = snapshot.body.dataStream;
+                const selectedText = dataStream.substring(startOffset, endOffset);
+
+                console.log("[AI Button] Selected text:", selectedText);
+                console.log("[AI Button] Selection range:", { startOffset, endOffset });
+
+                if (selectedText?.trim()) {
+                  // Dispatch AI action event
+                  const event = new CustomEvent("univer:ai-action", {
+                    detail: {
+                      action: "ai-assist",
+                      selectedText: selectedText,
+                      documentId: activeDoc.getId(),
+                      selectionRange: { startOffset, endOffset },
+                      timestamp: Date.now(),
+                    },
+                  });
+                  window.dispatchEvent(event);
+                  console.log("[AI Button] ✓ AI action event dispatched");
+                } else {
+                  alert("Please select some text in the document first.");
+                }
+              } catch (err) {
+                console.error("[AI Button] Error getting selection:", err);
+                alert(
+                  "Unable to capture selected text: " +
+                    (err instanceof Error ? err.message : String(err)),
+                );
+              }
+            }}
+            disabled={loading || !!error}
+            className="bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-600 hover:to-indigo-700 text-white border-0"
+            title="AI Assistant - Select text and click to get AI help"
           >
-            <Download className="h-4 w-4" />
+            <svg
+              className="mr-2 h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2M7.5 13a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3m9 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3M8 18h8" />
+            </svg>
+            AI
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExport}
+            className="border-emerald-200 hover:bg-emerald-50 hover:border-emerald-300"
+          >
+            <Download className="h-4 w-4 mr-2" />
             Export
-          </button>
+          </Button>
         </div>
       )}
 
@@ -699,10 +996,139 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
             key={documentData?.id || "blank"}
             className="flex-1"
             ref={containerRef}
-            style={{ overflow: "hidden", position: "relative" }}
+            style={{ 
+              overflow: "hidden", 
+              position: "relative"
+            }}
           />
         </>
       )}
+
+      {/* AI Assistant Sheet */}
+      <Sheet 
+        open={showAISheet} 
+        onOpenChange={(open) => {
+          console.log("[AI Sheet] State changing to:", open);
+          setShowAISheet(open);
+        }}
+      >
+        <SheetContent side="right" className="w-[400px] sm:w-[540px] p-0">
+          <div className="p-6">
+            <SheetHeader>
+              <SheetTitle className="flex items-center gap-2 text-xl font-bold">
+                <svg
+                  className="h-5 w-5 text-purple-600"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2M7.5 13a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3m9 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3M8 18h8" />
+                </svg>
+                AI Assistant
+              </SheetTitle>
+              <SheetDescription className="text-sm">
+                Refine or get help with your selected text
+              </SheetDescription>
+            </SheetHeader>
+            <div className="mt-8 space-y-6">
+              <div className="space-y-3">
+                <label className="text-sm font-semibold text-foreground">
+                  Selected Text
+                </label>
+                <div className="relative">
+                  <textarea
+                    value={selectedText}
+                    readOnly
+                    className="w-full min-h-[140px] p-4 text-sm border border-gray-300 rounded-lg resize-none bg-gray-50 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    placeholder="Select text in the document to get started..."
+                  />
+                  {selectedText && (
+                    <div className="absolute top-2 right-2 text-xs text-gray-500 bg-white px-2 py-0.5 rounded-md shadow-sm">
+                      {selectedText.length} chars
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="space-y-3">
+                <label className="text-sm font-semibold text-foreground">
+                  What would you like to do?
+                </label>
+                <textarea
+                  value={aiPrompt}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  className="w-full min-h-[140px] p-4 text-sm border border-gray-300 rounded-lg resize-none bg-white focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  placeholder="e.g., Summarize this text, Improve the writing, Translate to Spanish..."
+                />
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => setAiPrompt("Summarize this text")}
+                    className="text-xs px-3 py-1.5 rounded-md bg-purple-50 hover:bg-purple-100 text-purple-700 font-medium transition-colors"
+                  >
+                    Summarize
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiPrompt("Improve the writing")}
+                    className="text-xs px-3 py-1.5 rounded-md bg-purple-50 hover:bg-purple-100 text-purple-700 font-medium transition-colors"
+                  >
+                    Improve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiPrompt("Translate to Spanish")}
+                    className="text-xs px-3 py-1.5 rounded-md bg-purple-50 hover:bg-purple-100 text-purple-700 font-medium transition-colors"
+                  >
+                    Translate
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiPrompt("Explain this")}
+                    className="text-xs px-3 py-1.5 rounded-md bg-purple-50 hover:bg-purple-100 text-purple-700 font-medium transition-colors"
+                  >
+                    Explain
+                  </button>
+                </div>
+              </div>
+              <Button
+                className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white h-12 text-base font-semibold shadow-md hover:shadow-lg transition-shadow"
+                onClick={() => {
+                  if (!selectedText.trim()) {
+                    alert("Please select some text first");
+                    return;
+                  }
+                  if (!aiPrompt.trim()) {
+                    alert("Please enter what you'd like to do");
+                    return;
+                  }
+                  console.log("[AI] Selected:", selectedText);
+                  console.log("[AI] Prompt:", aiPrompt);
+                  alert(
+                    `AI Processing...\n\nSelected: "${selectedText.substring(
+                      0,
+                      100,
+                    )}${
+                      selectedText.length > 100 ? "..." : ""
+                    }"\n\nPrompt: "${aiPrompt}"\n\n(AI integration would happen here)`,
+                  );
+                }}
+              >
+                <svg
+                  className="mr-2 h-4 w-4"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2M7.5 13a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3m9 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3M8 18h8" />
+                </svg>
+                Process with AI
+              </Button>
+            </div>
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

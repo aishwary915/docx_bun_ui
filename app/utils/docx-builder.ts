@@ -304,6 +304,101 @@ function buildDocumentXml(
   const processedParagraphs = new Set<number>();
   let currentIndex = 0;
 
+  // ✅ FIX: Handle content before the first paragraph
+  // If there's content from position 0 up to the first paragraph, create a paragraph for it
+  if (paragraphs.length > 0 && paragraphs[0].startIndex > 0) {
+    const firstParaStart = paragraphs[0].startIndex;
+    const leadingText = dataStream.substring(0, firstParaStart);
+    
+    // Check if there's actual text content (not just control characters)
+    const cleanLeadingText = leadingText.replace(/[\x00-\x1F]/g, "").trim();
+    
+    if (cleanLeadingText.length > 0) {
+      console.log(
+        `[DOCX Export] Found ${cleanLeadingText.length} characters before first paragraph (position 0-${firstParaStart})`
+      );
+      console.log(`[DOCX Export] Leading text: "${cleanLeadingText}"`);
+      
+      // Create a paragraph for this leading content
+      const p = doc.ele("w:p");
+      const pPr = p.ele("w:pPr");
+      
+      // Get runs that overlap with this leading content (0 to firstParaStart)
+      const leadingRuns = textRuns.filter(
+        (run: any) => run.st < firstParaStart && run.ed > 0
+      );
+      
+      console.log(`[DOCX Export] Leading runs: ${leadingRuns.length}`);
+      
+      if (leadingRuns.length > 0) {
+        // Sort runs by start position
+        leadingRuns.sort((a: any, b: any) => a.st - b.st);
+        
+        let lastPos = 0;
+        
+        leadingRuns.forEach((run: any) => {
+          const runStart = Math.max(run.st, 0);
+          const runEnd = Math.min(run.ed, firstParaStart);
+          
+          // Check for gap before this run (unformatted text)
+          if (runStart > lastPos) {
+            const gapText = dataStream.substring(lastPos, runStart);
+            const cleanGapText = gapText.replace(/[\x00-\x1F]/g, "");
+            
+            if (cleanGapText.length > 0) {
+              const r = p.ele("w:r");
+              r.ele("w:t", { "xml:space": "preserve" }).txt(cleanGapText);
+              console.log(
+                `[DOCX Export] Added unformatted leading text (${lastPos}-${runStart}): "${cleanGapText}"`
+              );
+            }
+          }
+          
+          // Add the formatted run
+          const runText = dataStream.substring(runStart, runEnd);
+          const cleanText = runText.replace(/[\x00-\x1F]/g, "");
+          
+          if (cleanText.length > 0) {
+            const r = p.ele("w:r");
+            
+            if (run.ts && Object.keys(run.ts).length > 0) {
+              const rPr = r.ele("w:rPr");
+              addRunProperties(rPr, run.ts);
+              console.log(
+                `[DOCX Export] Added formatted leading run (${runStart}-${runEnd}) with formatting:`,
+                run.ts
+              );
+            }
+            
+            r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
+          }
+          
+          lastPos = runEnd;
+        });
+        
+        // Check for any remaining text after the last run
+        if (lastPos < firstParaStart) {
+          const remainingText = dataStream.substring(lastPos, firstParaStart);
+          const cleanRemainingText = remainingText.replace(/[\x00-\x1F]/g, "");
+          
+          if (cleanRemainingText.length > 0) {
+            const r = p.ele("w:r");
+            r.ele("w:t", { "xml:space": "preserve" }).txt(cleanRemainingText);
+            console.log(
+              `[DOCX Export] Added remaining unformatted text (${lastPos}-${firstParaStart}): "${cleanRemainingText}"`
+            );
+          }
+        }
+      } else {
+        // No runs, just add the text
+        const r = p.ele("w:r");
+        r.ele("w:t", { "xml:space": "preserve" }).txt(cleanLeadingText);
+      }
+    }
+    
+    currentIndex = firstParaStart;
+  }
+
   // Process content in document order
   while (currentIndex < dataStream.length && paragraphs.length > 0) {
     // Check if we're at a table position
@@ -392,6 +487,11 @@ function buildDocumentXml(
       let lastRunEnd = paraStart;
 
       paraRuns.forEach((run: any) => {
+        // Debug: Log run processing (browser and server safe)
+        if (typeof console !== 'undefined') {
+          console.log(`[DOCX Export] Processing run st=${run.st}, ed=${run.ed}, va=${run.ts?.va}`);
+        }
+        
         // Clip run to paragraph boundaries
         const runStart = Math.max(run.st, paraStart);
         const runEnd = Math.min(run.ed, paraEnd);
@@ -1044,11 +1144,19 @@ function addRunProperties(rPr: any, ts: any): void {
   }
 
   // Superscript/Subscript
-  if (ts.va === 1) {
+  // Univer uses: va: 2 = subscript, va: 3 = superscript, va: 1 or undefined = normal
+  if (ts.va === 3) {
+    if (typeof window !== 'undefined') {
+      console.log(`[DOCX Export] Adding superscript (va=3)`);
+    }
     rPr.ele("w:vertAlign", { "w:val": "superscript" });
   } else if (ts.va === 2) {
+    if (typeof window !== 'undefined') {
+      console.log(`[DOCX Export] Adding subscript (va=2)`);
+    }
     rPr.ele("w:vertAlign", { "w:val": "subscript" });
   }
+  // va: 1 or undefined = normal text (no vertAlign element needed)
 }
 
 function addBulletProperties(pPr: any, bullet: any): void {
