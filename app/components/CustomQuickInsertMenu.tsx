@@ -147,11 +147,12 @@ export function CustomQuickInsertMenu({
       }
     };
 
-    // Increased delay to prevent immediate closing - longer delay for end-of-file cases
+    // Increased delay to prevent immediate closing - much longer delay for end-of-file cases
+    // where cursor/document events might trigger false click-outside
     const timeoutId = setTimeout(() => {
       document.addEventListener("mousedown", handleClickOutside);
       console.log("[CustomQuickInsertMenu] Click-outside handler attached");
-    }, 300);
+    }, 500);
 
     return () => {
       clearTimeout(timeoutId);

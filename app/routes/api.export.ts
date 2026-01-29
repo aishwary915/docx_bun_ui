@@ -21,7 +21,12 @@ export async function action({ request }: { request: Request }) {
     // Parse the document data from request body
     const body = await request.json();
     const { documentData, filename } = body;
-
+    console.log("🚀 ~ action ~ documentData:", JSON.stringify(documentData));
+console.log("🚀 ~ action ~ documentData textRuns:", JSON.stringify(documentData.body?.textRuns));
+console.log("🚀 ~ action ~ documentData paragraphs:", JSON.stringify(documentData.body?.paragraphs));
+console.log("🚀 ~ action ~ documentData tables:", JSON.stringify(documentData.body?.tables));
+console.log("🚀 ~ action ~ documentData drawings:", JSON.stringify(documentData.drawings));
+console.log("🚀 ~ action ~ documentData dataStream:", documentData.body?.dataStream ? documentData.body.dataStream.substring(0, 100) + '...' : 'empty');
     if (!documentData) {
       return Response.json({ error: "Missing document data" }, { status: 400 });
     }

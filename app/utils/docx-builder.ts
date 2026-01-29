@@ -19,12 +19,6 @@ interface ImageInfo {
   extension: string;
 }
 
-interface TableRange {
-  start: number;
-  end: number;
-  tableId: string;
-}
-
 // ✅ OOXML VALIDATION: Validate document structure before export
 function validateOOXMLStructure(documentData: IDocumentData): string[] {
   const errors: string[] = [];
@@ -207,11 +201,10 @@ function buildDocumentXml(
   documentData: IDocumentData,
   imageInfos: ImageInfo[]
 ): string {
+  console.log("🚀 ~ buildDocumentXml ~ documentData:", documentData)
   const dataStream = documentData.body?.dataStream || "";
   const textRuns = documentData.body?.textRuns || [];
   const paragraphs = documentData.body?.paragraphs || [];
-  const bodyTables = documentData.body?.tables || [];
-  const tables = (documentData as any).tables || {};
 
   const doc = create({ version: "1.0", encoding: "UTF-8", standalone: "yes" })
     .ele("w:document", {
@@ -243,13 +236,6 @@ function buildDocumentXml(
     })
     .ele("w:body");
 
-  // Build index of table ranges
-  const tableRanges: TableRange[] = (bodyTables || []).map((t: any) => ({
-    start: t.startIndex,
-    end: t.endIndex,
-    tableId: t.tableId,
-  }));
-
   // Find image marker positions (0x1A character)
   const imageMarkerPositions: number[] = [];
   for (let i = 0; i < dataStream.length; i++) {
@@ -267,29 +253,13 @@ function buildDocumentXml(
   });
 
   console.log(
-    `[DOCX Export] Building document: ${paragraphs.length} paragraphs, ${tableRanges.length} tables, ${imageInfos.length} images`
-  );
-  console.log(
-    `[DOCX Export] Table ranges:`,
-    tableRanges.map((t) => `${t.tableId}: ${t.start}-${t.end}`)
-  );
-  console.log(
-    `[DOCX Export] Available table IDs in tables object:`,
-    Object.keys(tables)
-  );
-  console.log(
-    `[DOCX Export] Image positions:`,
-    Array.from(imageAtPosition.entries()).map(
-      ([pos, img]) => `${img.drawingId} at ${pos}`
-    )
+    `[DOCX Export] Building document: ${paragraphs.length} paragraphs, ${imageInfos.length} images`
   );
 
-  // Handle empty document case
-  if (paragraphs.length === 0 && tableRanges.length === 0) {
-    // Create at least one empty paragraph for valid DOCX
+  // Handle empty document
+  if (paragraphs.length === 0) {
     const p = doc.ele("w:p");
     if (dataStream.length > 0) {
-      // If there's content but no paragraphs defined, output the raw text
       const cleanText = dataStream.replace(/[\x00-\x1F]/g, "").trim();
       if (cleanText.length > 0) {
         const r = p.ele("w:r");
@@ -300,159 +270,20 @@ function buildDocumentXml(
     }
   }
 
-  // Track processed content
-  const processedParagraphs = new Set<number>();
-  let currentIndex = 0;
-
-  // ✅ FIX: Handle content before the first paragraph
-  // If there's content from position 0 up to the first paragraph, create a paragraph for it
-  if (paragraphs.length > 0 && paragraphs[0].startIndex > 0) {
-    const firstParaStart = paragraphs[0].startIndex;
-    const leadingText = dataStream.substring(0, firstParaStart);
-    
-    // Check if there's actual text content (not just control characters)
-    const cleanLeadingText = leadingText.replace(/[\x00-\x1F]/g, "").trim();
-    
-    if (cleanLeadingText.length > 0) {
-      console.log(
-        `[DOCX Export] Found ${cleanLeadingText.length} characters before first paragraph (position 0-${firstParaStart})`
-      );
-      console.log(`[DOCX Export] Leading text: "${cleanLeadingText}"`);
-      
-      // Create a paragraph for this leading content
-      const p = doc.ele("w:p");
-      const pPr = p.ele("w:pPr");
-      
-      // Get runs that overlap with this leading content (0 to firstParaStart)
-      const leadingRuns = textRuns.filter(
-        (run: any) => run.st < firstParaStart && run.ed > 0
-      );
-      
-      console.log(`[DOCX Export] Leading runs: ${leadingRuns.length}`);
-      
-      if (leadingRuns.length > 0) {
-        // Sort runs by start position
-        leadingRuns.sort((a: any, b: any) => a.st - b.st);
-        
-        let lastPos = 0;
-        
-        leadingRuns.forEach((run: any) => {
-          const runStart = Math.max(run.st, 0);
-          const runEnd = Math.min(run.ed, firstParaStart);
-          
-          // Check for gap before this run (unformatted text)
-          if (runStart > lastPos) {
-            const gapText = dataStream.substring(lastPos, runStart);
-            const cleanGapText = gapText.replace(/[\x00-\x1F]/g, "");
-            
-            if (cleanGapText.length > 0) {
-              const r = p.ele("w:r");
-              r.ele("w:t", { "xml:space": "preserve" }).txt(cleanGapText);
-              console.log(
-                `[DOCX Export] Added unformatted leading text (${lastPos}-${runStart}): "${cleanGapText}"`
-              );
-            }
-          }
-          
-          // Add the formatted run
-          const runText = dataStream.substring(runStart, runEnd);
-          const cleanText = runText.replace(/[\x00-\x1F]/g, "");
-          
-          if (cleanText.length > 0) {
-            const r = p.ele("w:r");
-            
-            if (run.ts && Object.keys(run.ts).length > 0) {
-              const rPr = r.ele("w:rPr");
-              addRunProperties(rPr, run.ts);
-              console.log(
-                `[DOCX Export] Added formatted leading run (${runStart}-${runEnd}) with formatting:`,
-                run.ts
-              );
-            }
-            
-            r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
-          }
-          
-          lastPos = runEnd;
-        });
-        
-        // Check for any remaining text after the last run
-        if (lastPos < firstParaStart) {
-          const remainingText = dataStream.substring(lastPos, firstParaStart);
-          const cleanRemainingText = remainingText.replace(/[\x00-\x1F]/g, "");
-          
-          if (cleanRemainingText.length > 0) {
-            const r = p.ele("w:r");
-            r.ele("w:t", { "xml:space": "preserve" }).txt(cleanRemainingText);
-            console.log(
-              `[DOCX Export] Added remaining unformatted text (${lastPos}-${firstParaStart}): "${cleanRemainingText}"`
-            );
-          }
-        }
-      } else {
-        // No runs, just add the text
-        const r = p.ele("w:r");
-        r.ele("w:t", { "xml:space": "preserve" }).txt(cleanLeadingText);
-      }
-    }
-    
-    currentIndex = firstParaStart;
-  }
-
-  // Process content in document order
-  while (currentIndex < dataStream.length && paragraphs.length > 0) {
-    // Check if we're at a table position
-    const tableRange = tableRanges.find(
-      (t) => currentIndex >= t.start && currentIndex <= t.end
-    );
-
-    if (tableRange) {
-      // Build table
-      const tableData = tables[tableRange.tableId];
-      if (tableData) {
-        console.log(
-          `[DOCX Export] ✓ Building table ${tableRange.tableId} at index ${tableRange.start}`
-        );
-        buildTable(doc, tableData, dataStream, textRuns, paragraphs);
-      } else {
-        console.error(
-          `[DOCX Export] ✗ Table data missing for ${tableRange.tableId}! Available tables:`,
-          Object.keys(tables)
-        );
-      }
-      currentIndex = tableRange.end + 1;
-      continue;
-    }
-
-    // Find the paragraph at or after current position
-    const paraIndex = paragraphs.findIndex(
-      (p: any) =>
-        p.startIndex >= currentIndex && !processedParagraphs.has(p.startIndex)
-    );
-    if (paraIndex === -1) break;
-
-    const para = paragraphs[paraIndex];
-
-    // Skip if paragraph is inside a table
-    const insideTable = tableRanges.some(
-      (t) => para.startIndex >= t.start && para.startIndex <= t.end
-    );
-
-    if (insideTable) {
-      processedParagraphs.add(para.startIndex);
-      currentIndex = para.startIndex + 1;
-      continue;
-    }
-
-    // Calculate paragraph end
+  // Process paragraphs
+  // CRITICAL: In Univer, paragraph.startIndex points to the \r at the END of the paragraph's text
+  // So paragraph text is BEFORE startIndex, from previous paragraph's end to this one's startIndex
+  paragraphs.forEach((para: any, paraIndex: number) => {
+    const prevPara = paragraphs[paraIndex - 1];
     const nextPara = paragraphs[paraIndex + 1];
-    const paraStart = para.startIndex;
-    const paraEnd = nextPara ? nextPara.startIndex : dataStream.length;
+    
+    // Calculate actual text range for this paragraph
+    // Text starts after previous paragraph's \r, or at 0 for first paragraph
+    const paraStart = paraIndex === 0 ? 0 : (prevPara.startIndex + 1);
+    // Text ends at this paragraph's \r position (inclusive of content before \r)
+    const paraEnd = para.startIndex + 1; // Include the \r position
 
-    // Build paragraph
     const p = doc.ele("w:p");
-
-    // Add paragraph properties
     const pPr = p.ele("w:pPr");
 
     if (para.paragraphStyle) {
@@ -463,54 +294,67 @@ function buildDocumentXml(
       addBulletProperties(pPr, para.bullet);
     }
 
-    // Process paragraph content - include runs that overlap with this paragraph
+    // Process runs in this paragraph
+    // Find runs that overlap with this paragraph's text range
     const paraRuns = textRuns.filter(
-      (run: any) => run.st < paraEnd && run.ed > paraStart
+      (run: any) => run.st < paraEnd && run.ed >= paraStart
     );
 
     if (paraRuns.length === 0) {
-      // Check if there's an image in this paragraph
+      // No formatted runs - check if there's plain text or images
       const imgPos = imageMarkerPositions.find(
         (pos) => pos >= paraStart && pos < paraEnd
       );
+      
       if (imgPos !== undefined) {
         const imgInfo = imageAtPosition.get(imgPos);
         if (imgInfo) {
           addImageToRun(p, imgInfo);
         }
       } else {
-        // Empty paragraph - add empty run
-        p.ele("w:r");
+        // Extract plain text from dataStream (no formatting)
+        const paraText = dataStream.substring(paraStart, paraEnd);
+        const cleanText = paraText.replace(/[\x00-\x1F]/g, "").trim();
+        
+        if (cleanText.length > 0) {
+          const r = p.ele("w:r");
+          r.ele("w:t", { "xml:space": "preserve" }).txt(cleanText);
+        } else {
+          // Truly empty paragraph
+          p.ele("w:r");
+        }
       }
     } else {
-      // Process runs, checking for images between/within runs
       let lastRunEnd = paraStart;
 
       paraRuns.forEach((run: any) => {
-        // Debug: Log run processing (browser and server safe)
-        if (typeof console !== 'undefined') {
-          console.log(`[DOCX Export] Processing run st=${run.st}, ed=${run.ed}, va=${run.ts?.va}`);
-        }
-        
-        // Clip run to paragraph boundaries
         const runStart = Math.max(run.st, paraStart);
         const runEnd = Math.min(run.ed, paraEnd);
 
-        // Check for image between last run and this run
-        const imgBetween = imageMarkerPositions.find(
-          (pos) => pos >= lastRunEnd && pos < runStart
-        );
-        if (imgBetween !== undefined) {
-          const imgInfo = imageAtPosition.get(imgBetween);
-          if (imgInfo) {
-            addImageToRun(p, imgInfo);
+        // Handle unformatted text BEFORE this run (gap between runs)
+        if (lastRunEnd < runStart) {
+          const gapText = dataStream.substring(lastRunEnd, runStart);
+          const cleanGapText = gapText.replace(/[\x00-\x1F]/g, "");
+          
+          if (cleanGapText.length > 0) {
+            // Unformatted text between runs - add as plain text run
+            const plainRun = p.ele("w:r");
+            plainRun.ele("w:t", { "xml:space": "preserve" }).txt(cleanGapText);
+          }
+          
+          // Check for image in gap
+          const imgBetween = imageMarkerPositions.find(
+            (pos) => pos >= lastRunEnd && pos < runStart
+          );
+          if (imgBetween !== undefined) {
+            const imgInfo = imageAtPosition.get(imgBetween);
+            if (imgInfo) {
+              addImageToRun(p, imgInfo);
+            }
           }
         }
 
-        // Get run text from the clipped range, filtering out control characters
         const runText = dataStream.substring(runStart, runEnd);
-
-        // Check if this run contains an image marker
         const imgInRun = imageMarkerPositions.find(
           (pos) => pos >= runStart && pos < runEnd
         );
@@ -531,7 +375,6 @@ function buildDocumentXml(
             );
           }
 
-          // Add image
           if (imgInfo) {
             addImageToRun(p, imgInfo);
           }
@@ -549,7 +392,7 @@ function buildDocumentXml(
             );
           }
         } else {
-          // Regular text run - filter control characters
+          // Regular text run
           const cleanText = runText.replace(/[\x00-\x1F]/g, "");
           if (cleanText.length > 0) {
             const r = p.ele("w:r");
@@ -566,27 +409,30 @@ function buildDocumentXml(
         lastRunEnd = runEnd;
       });
 
-      // Check for image after last run
-      const imgAfter = imageMarkerPositions.find(
-        (pos) => pos >= lastRunEnd && pos < paraEnd
-      );
-      if (imgAfter !== undefined) {
-        const imgInfo = imageAtPosition.get(imgAfter);
-        if (imgInfo) {
-          addImageToRun(p, imgInfo);
+      // Handle unformatted text AFTER the last run
+      if (lastRunEnd < paraEnd) {
+        const remainingText = dataStream.substring(lastRunEnd, paraEnd);
+        const cleanRemaining = remainingText.replace(/[\x00-\x1F]/g, "");
+        
+        if (cleanRemaining.length > 0) {
+          // Unformatted text after last run - add as plain text run
+          const plainRun = p.ele("w:r");
+          plainRun.ele("w:t", { "xml:space": "preserve" }).txt(cleanRemaining);
+        }
+        
+        // Check for image after last run
+        const imgAfter = imageMarkerPositions.find(
+          (pos) => pos >= lastRunEnd && pos < paraEnd
+        );
+        if (imgAfter !== undefined) {
+          const imgInfo = imageAtPosition.get(imgAfter);
+          if (imgInfo) {
+            addImageToRun(p, imgInfo);
+          }
         }
       }
     }
-
-    processedParagraphs.add(para.startIndex);
-    currentIndex = paraEnd;
-  }
-
-  // Ensure document has at least one paragraph (required by OOXML spec)
-  if (processedParagraphs.size === 0 && tableRanges.length === 0) {
-    const p = doc.ele("w:p");
-    p.ele("w:r");
-  }
+  });
 
   // Add section properties
   const sectPr = doc.ele("w:sectPr");
@@ -706,267 +552,6 @@ function addImageToRun(parentElement: any, imgInfo: ImageInfo): void {
   console.log(
     `[DOCX Export] Added inline image: ${imgInfo.filename} (${imgInfo.width}x${imgInfo.height}pt)`
   );
-}
-
-function buildTable(
-  doc: any,
-  tableData: any,
-  dataStream: string,
-  textRuns: any[],
-  _paragraphs: any[]
-): void {
-  const tbl = doc.ele("w:tbl");
-
-  // Table properties
-  const tblPr = tbl.ele("w:tblPr");
-  tblPr.ele("w:tblW", { "w:w": "5000", "w:type": "pct" }); // 100% width
-
-  // Table layout
-  tblPr.ele("w:tblLayout", { "w:type": "autofit" });
-
-  // Add table borders
-  const tblBorders = tblPr.ele("w:tblBorders");
-
-  if (tableData.tableProperties?.borders) {
-    const borders = tableData.tableProperties.borders;
-    addTableBorder(tblBorders, "w:top", borders.top);
-    addTableBorder(tblBorders, "w:bottom", borders.bottom);
-    addTableBorder(tblBorders, "w:left", borders.left);
-    addTableBorder(tblBorders, "w:right", borders.right);
-    addTableBorder(tblBorders, "w:insideH", borders.insideH || borders.top);
-    addTableBorder(tblBorders, "w:insideV", borders.insideV || borders.left);
-  } else {
-    // Default borders
-    const defaultBorder = {
-      "w:val": "single",
-      "w:sz": "4",
-      "w:color": "000000",
-      "w:space": "0",
-    };
-    tblBorders.ele("w:top", defaultBorder);
-    tblBorders.ele("w:bottom", defaultBorder);
-    tblBorders.ele("w:left", defaultBorder);
-    tblBorders.ele("w:right", defaultBorder);
-    tblBorders.ele("w:insideH", defaultBorder);
-    tblBorders.ele("w:insideV", defaultBorder);
-  }
-
-  // Table alignment
-  if (tableData.tableProperties?.align !== undefined) {
-    const alignMap = ["left", "center", "right"];
-    tblPr.ele("w:jc", {
-      "w:val": alignMap[tableData.tableProperties.align] || "left",
-    });
-  }
-
-  // Table cell margins
-  const tblCellMar = tblPr.ele("w:tblCellMar");
-  tblCellMar.ele("w:top", { "w:w": "55", "w:type": "dxa" });
-  tblCellMar.ele("w:left", { "w:w": "108", "w:type": "dxa" });
-  tblCellMar.ele("w:bottom", { "w:w": "55", "w:type": "dxa" });
-  tblCellMar.ele("w:right", { "w:w": "108", "w:type": "dxa" });
-
-  // Table grid (column definitions)
-  const tblGrid = tbl.ele("w:tblGrid");
-  const numCols =
-    tableData.tableColumns?.length ||
-    tableData.tableRows?.[0]?.cells?.length ||
-    3;
-
-  for (let i = 0; i < numCols; i++) {
-    const col = tableData.tableColumns?.[i];
-    const colWidth = col?.size ? Math.round(col.size * 20) : 2880; // Default ~2 inches
-    tblGrid.ele("w:gridCol", { "w:w": colWidth.toString() });
-  }
-
-  // Table rows
-  const rows = tableData.tableRows || [];
-  rows.forEach((row: any, rowIndex: number) => {
-    const tr = tbl.ele("w:tr");
-
-    // Row properties
-    const trPr = tr.ele("w:trPr");
-    if (row.height || row.h) {
-      trPr.ele("w:trHeight", {
-        "w:val": Math.round((row.height || row.h || 20) * 20).toString(),
-        "w:hRule": "atLeast",
-      });
-    }
-
-    // Cells
-    const cells = row.cells || [];
-    cells.forEach((cell: any, _cellIndex: number) => {
-      // Skip cells that are continuation of vertical merge
-      if (cell.rowSpan === 0) return;
-
-      const tc = tbl.ele("w:tc");
-
-      // Cell properties
-      const tcPr = tc.ele("w:tcPr");
-
-      // Cell width
-      if (cell.width) {
-        tcPr.ele("w:tcW", {
-          "w:w": Math.round(cell.width * 20).toString(),
-          "w:type": "dxa",
-        });
-      } else {
-        tcPr.ele("w:tcW", { "w:w": "0", "w:type": "auto" });
-      }
-
-      // Column span
-      if (cell.colSpan && cell.colSpan > 1) {
-        tcPr.ele("w:gridSpan", { "w:val": cell.colSpan.toString() });
-      }
-
-      // Row span (vertical merge)
-      if (cell.rowSpan && cell.rowSpan > 1) {
-        tcPr.ele("w:vMerge", { "w:val": "restart" });
-      }
-
-      // Vertical alignment
-      if (cell.verticalAlign !== undefined) {
-        const vAlignMap = ["top", "center", "bottom"];
-        tcPr.ele("w:vAlign", {
-          "w:val": vAlignMap[cell.verticalAlign] || "top",
-        });
-      }
-
-      // Background color
-      if (cell.background?.rgb) {
-        const bgColor = cell.background.rgb.replace("#", "");
-        tcPr.ele("w:shd", {
-          "w:val": "clear",
-          "w:color": "auto",
-          "w:fill": bgColor,
-        });
-      }
-
-      // Cell borders
-      if (cell.borders) {
-        const tcBorders = tcPr.ele("w:tcBorders");
-        if (cell.borders.top) {
-          addCellBorder(tcBorders, "w:top", cell.borders.top);
-        }
-        if (cell.borders.bottom) {
-          addCellBorder(tcBorders, "w:bottom", cell.borders.bottom);
-        }
-        if (cell.borders.left) {
-          addCellBorder(tcBorders, "w:left", cell.borders.left);
-        }
-        if (cell.borders.right) {
-          addCellBorder(tcBorders, "w:right", cell.borders.right);
-        }
-      }
-
-      // Cell content - get text with styling
-      const cellContent = getCellContent(cell, dataStream, textRuns);
-
-      if (cellContent.runs.length > 0) {
-        const p = tc.ele("w:p");
-
-        // Add paragraph properties if first row (header styling)
-        if (rowIndex === 0) {
-          const pPr = p.ele("w:pPr");
-          pPr.ele("w:jc", { "w:val": "center" });
-        }
-
-        cellContent.runs.forEach((runInfo: any) => {
-          const r = p.ele("w:r");
-
-          // Apply text styling
-          if (runInfo.ts && Object.keys(runInfo.ts).length > 0) {
-            const rPr = r.ele("w:rPr");
-            addRunProperties(rPr, runInfo.ts);
-
-            // Add bold for header row
-            if (rowIndex === 0 && !runInfo.ts.bl) {
-              rPr.ele("w:b");
-            }
-          } else if (rowIndex === 0) {
-            // Header row styling
-            const rPr = r.ele("w:rPr");
-            rPr.ele("w:b");
-          }
-
-          r.ele("w:t", { "xml:space": "preserve" }).txt(runInfo.text);
-        });
-      } else {
-        // Empty cell - needs paragraph
-        const p = tc.ele("w:p");
-        p.ele("w:r");
-      }
-    });
-  });
-}
-
-function addTableBorder(parent: any, name: string, border: any): void {
-  if (border) {
-    parent.ele(name, {
-      "w:val": "single",
-      "w:sz": Math.round((border.w || 1) * 8).toString(),
-      "w:color": (border.cl?.rgb || "#000000").replace("#", ""),
-      "w:space": "0",
-    });
-  } else {
-    parent.ele(name, {
-      "w:val": "single",
-      "w:sz": "4",
-      "w:color": "000000",
-      "w:space": "0",
-    });
-  }
-}
-
-function addCellBorder(parent: any, name: string, border: any): void {
-  parent.ele(name, {
-    "w:val": "single",
-    "w:sz": Math.round((border.w || 1) * 8).toString(),
-    "w:color": (border.cl?.rgb || "#000000").replace("#", ""),
-    "w:space": "0",
-  });
-}
-
-function getCellContent(
-  cell: any,
-  dataStream: string,
-  textRuns: any[]
-): { runs: any[] } {
-  const runs: any[] = [];
-
-  if (cell.startIndex !== undefined && cell.endIndex !== undefined) {
-    // Find text runs that overlap with this cell
-    const cellRuns = textRuns.filter(
-      (run: any) => run.st < cell.endIndex && run.ed > cell.startIndex
-    );
-
-    if (cellRuns.length > 0) {
-      cellRuns.forEach((run: any) => {
-        const start = Math.max(run.st, cell.startIndex);
-        const end = Math.min(run.ed, cell.endIndex);
-        const text = dataStream
-          .substring(start, end)
-          .replace(/[\x00-\x1F]/g, "")
-          .trim();
-
-        if (text.length > 0) {
-          runs.push({ text, ts: run.ts || {} });
-        }
-      });
-    } else {
-      // No text runs, get raw text
-      const text = dataStream
-        .substring(cell.startIndex, cell.endIndex)
-        .replace(/[\x00-\x1F]/g, "")
-        .trim();
-
-      if (text.length > 0) {
-        runs.push({ text, ts: {} });
-      }
-    }
-  }
-
-  return { runs };
 }
 
 function addParagraphProperties(pPr: any, style: any): void {
