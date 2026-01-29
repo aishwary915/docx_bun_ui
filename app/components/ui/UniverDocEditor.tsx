@@ -14,6 +14,7 @@ import {
   SheetTitle,
 } from "~/components/ui/sheet";
 import { CustomQuickInsertPlugin } from "~/plugins/CustomQuickInsertPlugin";
+import { CursorNavigationPlugin } from "~/plugins/CursorNavigationPlugin";
 import { HorizontalLineSpacingPlugin } from "~/plugins/HorizontalLineSpacingPlugin";
 import { convertDocxToUniverData } from "~/utils/docx-converter";
 import CustomQuickInsertMenu from "../CustomQuickInsertMenu";
@@ -116,6 +117,12 @@ export function UniverDocEditor({ initialFile }: UniverDocEditorProps) {
         // Register the CustomQuickInsertPlugin after Univer is created
         univer.registerPlugin(CustomQuickInsertPlugin);
         console.log("✅ CustomQuickInsertPlugin registered successfully");
+
+        // Register the CursorNavigationPlugin to fix word/line navigation shortcuts
+        // This enables: Ctrl+Arrow (word nav), Home/End (line nav) on Windows
+        //              Option+Arrow (word nav), Cmd+Arrow (line nav) on macOS
+        univer.registerPlugin(CursorNavigationPlugin);
+        console.log("✅ CursorNavigationPlugin registered successfully");
 
         // Register the HorizontalLineSpacingPlugin for improved horizontal line spacing
         univer.registerPlugin(HorizontalLineSpacingPlugin);
