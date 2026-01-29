@@ -776,7 +776,7 @@ async function convertOOXMLToBody(
         }
         if (rPr["w:vertAlign"]?.["@_w:val"]) {
           const va = rPr["w:vertAlign"]["@_w:val"];
-          if (va === "superscript") ts.va = 1;
+          if (va === "superscript") ts.va = 3;
           if (va === "subscript") ts.va = 2;
         }
         if (rPr["w:color"]?.["@_w:val"]) {
